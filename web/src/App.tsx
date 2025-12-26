@@ -5,7 +5,16 @@ import type { FolderPayload, MediaItem, MediaKind } from "./types";
 import { MediaPreviewModal } from "./components/MediaPreviewModal";
 import { formatBytes, formatDate } from "./utils";
 
+type Theme = "light" | "dark";
+
 function App() {
+  const getInitialTheme = (): Theme => {
+    if (typeof window === "undefined") return "light";
+    const stored = window.localStorage.getItem("mv-theme");
+    if (stored === "light" || stored === "dark") return stored;
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  };
+
   const [folder, setFolder] = useState<FolderPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -20,8 +29,14 @@ function App() {
   const [sortMode, setSortMode] = useState<"time" | "name">("time");
   const [mediaSort, setMediaSort] = useState<"asc" | "desc">("desc");
   const [showScrollTop, setShowScrollTop] = useState(false);
+  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  const [manualTheme, setManualTheme] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("mv-theme-manual") === "true";
+  });
   const previewCache = useRef(new Map<string, FolderPayload>());
   const categoryLoadMoreRef = useRef<HTMLDivElement | null>(null);
+  const versionLabel = "v0.3";
 
   const filteredAccounts = useMemo(() => {
     if (!folder) return [];
@@ -108,6 +123,23 @@ function App() {
   };
 
   useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    window.localStorage.setItem("mv-theme", theme);
+    window.localStorage.setItem("mv-theme-manual", manualTheme ? "true" : "false");
+  }, [theme, manualTheme]);
+
+  useEffect(() => {
+    if (manualTheme) return;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (event: MediaQueryListEvent) => {
+      setTheme(event.matches ? "dark" : "light");
+    };
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, [manualTheme]);
+
+  useEffect(() => {
     loadRoot();
   }, []);
 
@@ -166,6 +198,38 @@ function App() {
 
   return (
     <div className="page">
+      <div
+        className={`microbar microbar--fixed ${
+          selected ? "microbar--hidden" : ""
+        }`}
+      >
+        <div className="microbar__left">
+          <div className="badge badge--split badge--brand">
+            <span className="badge__left">Media Viewer</span>
+            <span className="badge__right">{versionLabel}</span>
+          </div>
+          <div className="badge badge--split badge--ts">
+            <span className="badge__left">TypeScript</span>
+            <span className="badge__right">5.9</span>
+          </div>
+          <div className="badge badge--split badge--react">
+            <span className="badge__left">React</span>
+            <span className="badge__right">19</span>
+          </div>
+        </div>
+        <div className="microbar__right">
+          <button
+            className="theme-toggle"
+            onClick={() => {
+              setManualTheme(true);
+              setTheme(theme === "light" ? "dark" : "light");
+            }}
+            aria-label="切换主题"
+          >
+            {theme === "light" ? "☀️" : "🌙"}
+          </button>
+        </div>
+      </div>
       <section className="section">
         <div className="controls condensed">
           <div className="controls__actions wide">
