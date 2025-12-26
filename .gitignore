@@ -1,0 +1,7 @@
+node_modules
+dist
+.DS_Store
+web/node_modules
+web/dist
+server/node_modules
+server/dist
