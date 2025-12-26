@@ -63,6 +63,7 @@ const detectMediaKind = (ext: string): MediaKind | null => {
 };
 
 export class MediaScanner {
+  private static readonly CACHE_VERSION = "v3";
   private cache = new Map<string, CacheEntry>();
   private readonly categoryDirs = new Set([
     "image",
@@ -89,7 +90,8 @@ export class MediaScanner {
       throw new Error("Requested path is not a directory");
     }
 
-    const cached = this.cache.get(safeRelativePath);
+    const cacheKey = `${MediaScanner.CACHE_VERSION}:${safeRelativePath}`;
+    const cached = this.cache.get(cacheKey);
     if (cached && cached.mtimeMs === stat.mtimeMs) {
       return cached.data;
     }
@@ -154,7 +156,7 @@ export class MediaScanner {
       totals: { media: media.length, subfolders: subfolders.length },
     };
 
-    this.cache.set(safeRelativePath, { mtimeMs: stat.mtimeMs, data: payload });
+    this.cache.set(cacheKey, { mtimeMs: stat.mtimeMs, data: payload });
     return payload;
   }
 
@@ -177,16 +179,17 @@ export class MediaScanner {
 
       if (entry.isDirectory()) {
         if (this.categoryDirs.has(entry.name.toLowerCase())) {
-          const remaining = this.previewLimit - previews.length;
-          if (remaining > 0) {
-            const previewAdded = await this.collectCategoryPreview(
+          const countLimit = Math.max(0, this.maxItems - processed);
+          if (countLimit > 0) {
+            const { added, counted } = await this.collectCategoryPreview(
               entryAbsolute,
               entryRelative,
               previews,
               counts,
-              remaining
+              Math.max(0, this.previewLimit - previews.length),
+              countLimit
             );
-            processed += previewAdded;
+            processed += counted;
           }
         } else {
           counts.subfolders += 1;
@@ -279,27 +282,31 @@ export class MediaScanner {
     relativePath: string,
     previews: MediaItem[],
     counts: FolderPreview["counts"],
-    limit: number
+    previewLimit: number,
+    countLimit: number
   ) {
     const entries = await fs.readdir(absolutePath, { withFileTypes: true });
     let added = 0;
+    let counted = 0;
     for (const entry of entries) {
       if (entry.name.startsWith(".")) continue;
+      if (counted >= countLimit) break;
       const entryAbsolute = path.join(absolutePath, entry.name);
       const stats = await fs.stat(entryAbsolute);
       if (!entry.isFile()) continue;
       const kind = detectMediaKind(path.extname(entry.name).toLowerCase());
       if (!kind) continue;
+      counted += 1;
       if (kind === "gif") counts.videos += 1;
       else if (kind === "image") counts.images += 1;
       else counts.videos += 1;
-      if (added < limit) {
+      if (added < previewLimit) {
         const rel = toPosix(path.join(relativePath, entry.name));
         previews.push(this.buildMediaItemFromStat(entry.name, rel, stats, kind));
         added += 1;
       }
     }
-    return added;
+    return { added, counted };
   }
 
   private buildBreadcrumb(relativePath: string) {
