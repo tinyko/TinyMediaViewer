@@ -37,7 +37,7 @@ function App() {
   const previewCache = useRef(new Map<string, FolderPayload>());
   const categoryLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
-  const versionLabel = "v0.4";
+  const versionLabel = "v0.4.1";
 
   const filteredAccounts = useMemo(() => {
     if (!folder) return [];

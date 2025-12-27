@@ -1,5 +1,8 @@
 # Changelog
 
+## v0.4.1
+- 更新网页标签与 favicon，统一品牌为 Tiny Media Viewer。
+
 ## v0.4
 - 品牌更新为 Tiny Media Viewer，顶部胶囊沿用 GitHub 风格并同步版本号。
 - 布局调整：主页面高度锁定，左侧列表与媒体区独立滚动，顶部胶囊和媒体工具条固定；回到顶部按钮随媒体区滚动。
