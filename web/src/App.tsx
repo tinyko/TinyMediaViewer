@@ -36,7 +36,8 @@ function App() {
   });
   const previewCache = useRef(new Map<string, FolderPayload>());
   const categoryLoadMoreRef = useRef<HTMLDivElement | null>(null);
-  const versionLabel = "v0.3";
+  const previewScrollRef = useRef<HTMLDivElement | null>(null);
+  const versionLabel = "v0.4";
 
   const filteredAccounts = useMemo(() => {
     if (!folder) return [];
@@ -79,6 +80,9 @@ function App() {
     );
   }, [categoryMedia, mediaFilter, mediaSort]);
   const visibleCategoryMedia = filteredCategoryMedia.slice(0, categoryVisibleCount);
+  const totalMedia = categoryPreview?.totals.media ?? 0;
+  const visibleCount = filteredCategoryMedia.length;
+  const meterPercent = totalMedia ? Math.min(100, (visibleCount / totalMedia) * 100) : 0;
   const selectedIndex = selected
     ? filteredCategoryMedia.findIndex((item) => item.path === selected.path)
     : -1;
@@ -172,6 +176,7 @@ function App() {
 
   useEffect(() => {
     const target = categoryLoadMoreRef.current;
+    const root = previewScrollRef.current;
     if (!target || !categoryPreview) return;
     const observer = new IntersectionObserver(
       (entries) => {
@@ -181,20 +186,23 @@ function App() {
           );
         }
       },
-      { rootMargin: "200px" }
+      { root: root ?? null, rootMargin: "200px" }
     );
     observer.observe(target);
     return () => observer.disconnect();
   }, [categoryPreview, filteredCategoryMedia.length]);
 
   useEffect(() => {
-    const onScroll = () => {
-      const scrolled = window.scrollY > 200;
-      setShowScrollTop(scrolled);
-    };
-    window.addEventListener("scroll", onScroll);
-    return () => window.removeEventListener("scroll", onScroll);
-  }, []);
+    const el = previewScrollRef.current;
+    if (!el) {
+      setShowScrollTop(false);
+      return;
+    }
+    const onScroll = () => setShowScrollTop(el.scrollTop > 200);
+    el.addEventListener("scroll", onScroll);
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [categoryPreview, mediaFilter, sortMode, mediaSort]);
 
   return (
     <div className="page">
@@ -205,7 +213,7 @@ function App() {
       >
         <div className="microbar__left">
           <div className="badge badge--split badge--brand">
-            <span className="badge__left">Media Viewer</span>
+            <span className="badge__left">Tiny Media Viewer</span>
             <span className="badge__right">{versionLabel}</span>
           </div>
           <div className="badge badge--split badge--ts">
@@ -307,88 +315,92 @@ function App() {
             )}
           </div>
 
-          <div className="category-preview">
-            {categoryLoading && <div className="empty">加载账号媒体...</div>}
-            {categoryError && <div className="empty">{categoryError}</div>}
-            {!categoryLoading && !categoryError && categoryPreview && (
-              <>
-                <div className="category-preview__header">
-                  <div>
-                    <h3>{categoryPreview.folder.name}</h3>
-                    <p className="muted">
-                      {filteredCategoryMedia.length} / {categoryPreview.totals.media} 媒体
-                    </p>
-                  </div>
-                  <div className="toggle-switch wide">
-                    <div
-                      className="toggle-indicator"
-                      data-side={mediaSort === "asc" ? "left" : "right"}
-                    />
-                    <button
-                      className={`toggle-option ${mediaSort === "asc" ? "active" : ""}`}
-                      onClick={() => setMediaSort("asc")}
-                      aria-pressed={mediaSort === "asc"}
-                    >
-                      按时间+
-                    </button>
-                    <button
-                      className={`toggle-option ${mediaSort === "desc" ? "active" : ""}`}
-                      onClick={() => setMediaSort("desc")}
-                      aria-pressed={mediaSort === "desc"}
-                    >
-                      按时间-
-                    </button>
+            <div className="category-panel">
+              <div className="category-toolbar">
+                <div className="category-toolbar__meta">
+                  <div className="meter-pill" aria-label="媒体计数">
+                    <div className="meter-pill__fill" style={{ width: `${meterPercent}%` }} />
+                    <span className="meter-pill__text">
+                      {visibleCount} / {totalMedia} 媒体
+                    </span>
                   </div>
                 </div>
+                <div className="toggle-switch tiny">
+                  <div
+                    className="toggle-indicator"
+                    data-side={mediaSort === "asc" ? "left" : "right"}
+                />
+                <button
+                  className={`toggle-option ${mediaSort === "asc" ? "active" : ""}`}
+                  onClick={() => setMediaSort("asc")}
+                  aria-pressed={mediaSort === "asc"}
+                >
+                  按时间+
+                </button>
+                <button
+                  className={`toggle-option ${mediaSort === "desc" ? "active" : ""}`}
+                  onClick={() => setMediaSort("desc")}
+                  aria-pressed={mediaSort === "desc"}
+                >
+                  按时间-
+                </button>
+              </div>
+            </div>
 
-                <div className="media-grid">
-          {visibleCategoryMedia.map((item) => (
-            <button
-              key={`${categoryPreview.folder.path}-${item.path}`}
-              className="media-card"
-              onClick={() => {
-                setSelected(item);
-              }}
-              title={item.name}
-            >
-              {item.kind === "video" ? (
-                <video muted playsInline preload="metadata">
-                  <source src={item.url} />
-                        </video>
-                      ) : (
-                        <img src={item.url} alt={item.name} loading="lazy" />
-                      )}
-                      <div className="media-card__meta">
-                        <div>
-                          <p className="media-title">{item.name}</p>
-                          <p className="muted">
-                            {formatBytes(item.size)} · {formatDate(item.modified)}
-                          </p>
+            <div className="category-preview" ref={previewScrollRef}>
+              {categoryLoading && <div className="empty">加载账号媒体...</div>}
+              {categoryError && <div className="empty">{categoryError}</div>}
+              {!categoryLoading && !categoryError && categoryPreview && (
+                <>
+                  <div className="media-grid">
+                    {visibleCategoryMedia.map((item) => (
+                      <button
+                        key={`${categoryPreview.folder.path}-${item.path}`}
+                        className="media-card"
+                        onClick={() => {
+                          setSelected(item);
+                        }}
+                        title={item.name}
+                      >
+                        {item.kind === "video" ? (
+                          <video muted playsInline preload="metadata">
+                            <source src={item.url} />
+                          </video>
+                        ) : (
+                          <img src={item.url} alt={item.name} loading="lazy" />
+                        )}
+                        <div className="media-card__meta">
+                          <div>
+                            <p className="media-title">{item.name}</p>
+                            <p className="muted">
+                              {formatBytes(item.size)} · {formatDate(item.modified)}
+                            </p>
+                          </div>
                         </div>
-                      </div>
-                    </button>
-                  ))}
-                  {!visibleCategoryMedia.length && (
-                    <div className="empty">该账号暂无符合过滤条件的媒体</div>
-                  )}
-                </div>
-                {visibleCategoryMedia.length < filteredCategoryMedia.length && (
-                  <div className="load-more">
-                    <button
-                      className="primary-button"
-                      onClick={() =>
-                        setCategoryVisibleCount((prev) =>
-                          Math.min(prev + 32, filteredCategoryMedia.length)
-                        )
-                      }
-                    >
-                      加载更多
-                    </button>
-                    <div ref={categoryLoadMoreRef} style={{ height: 1 }} />
+                      </button>
+                    ))}
+                    {!visibleCategoryMedia.length && (
+                      <div className="empty">该账号暂无符合过滤条件的媒体</div>
+                    )}
                   </div>
-                )}
-              </>
-            )}
+                  {visibleCategoryMedia.length < filteredCategoryMedia.length && (
+                    <div className="load-more">
+                      <button
+                        className="primary-button"
+                        onClick={() =>
+                          setCategoryVisibleCount((prev) =>
+                            Math.min(prev + 32, filteredCategoryMedia.length)
+                          )
+                        }
+                      >
+                        加载更多
+                      </button>
+                      <div ref={categoryLoadMoreRef} style={{ height: 1 }} />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
           </div>
         </div>
       </section>
@@ -424,7 +436,14 @@ function App() {
       {showScrollTop && (
         <button
           className="scroll-top"
-          onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+          onClick={() => {
+            const el = previewScrollRef.current;
+            if (el) {
+              el.scrollTo({ top: 0, behavior: "smooth" });
+            } else {
+              window.scrollTo({ top: 0, behavior: "smooth" });
+            }
+          }}
           aria-label="回到顶部"
         >
           ↑
