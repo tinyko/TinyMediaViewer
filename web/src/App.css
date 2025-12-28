@@ -206,8 +206,15 @@
 }
 
 .controls__actions.wide .search-input {
-  flex: 1;
-  min-width: 200px;
+  flex: 0 0 200px;
+  min-width: 170px;
+}
+
+.controls__cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
 }
 
 .toolbar__filters.inline {
@@ -230,6 +237,11 @@
 .toggle-switch.small {
   width: 160px;
   height: 38px;
+}
+
+.toggle-switch.mini {
+  width: 150px;
+  height: 32px;
 }
 
 .toggle-switch.wide {
@@ -272,6 +284,11 @@
   color: var(--chip-active-text);
 }
 
+.toggle-switch.tiny .toggle-option,
+.toggle-switch.mini .toggle-option {
+  font-size: 12px;
+  padding: 0 4px;
+}
 .toggle-switch.tiny .toggle-option {
   font-size: 12px;
   padding: 0 4px;
@@ -428,8 +445,8 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 140px;
-  padding: 4px 10px;
+  min-width: 120px;
+  padding: 3px 8px;
   border-radius: 999px;
   background: var(--pill-bg);
   border: 1px solid var(--border);
@@ -452,6 +469,11 @@
   color: var(--text);
   z-index: 1;
   white-space: nowrap;
+  font-size: 12px;
+}
+
+.controls__cluster .meter-pill {
+  min-width: 110px;
 }
 
 .media-sort-buttons {

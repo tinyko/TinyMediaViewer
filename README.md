@@ -2,6 +2,11 @@
 
 面向 `/Users/tiny/X` 媒体库的全栈预览工具。后端用 TypeScript + Fastify 快速扫描目录并输出带快照的结构化数据，前端用 Vite + React 提供“无需进入子目录就能看预览”的浏览体验。
 
+## Demo
+<video src="./demo.mp4" controls width="720" style="max-width: 100%; height: auto;" poster="./demo.png"></video>
+
+![Tiny Media Viewer 截图](./demo.png)
+
 ## 架构与默认行为
 - **后端（server）**：Fastify + TypeScript，按需扫描目录，提供 `/api/folder` 元数据接口，并通过 `/media/*` 直接回源真实文件。路径安全校验 + mtime 缓存，分类目录（images/gifs/videos 等）计数修正。
 - **前端（web）**：Vite + React + TypeScript。账号列表与媒体网格；滑块式互斥切换：媒体类型（图片/视频）、排序（按时间/按名称）、时间方向（时间+/时间-，默认时间-）。预览弹窗支持左右按钮、键盘、滚轮、滑动，点击图片可关闭，浮动回顶按钮贴内容区。顶部悬浮信息条（产品名+版本、TS/React 胶囊）与主题切换（跟随系统，支持手动日/夜覆盖）。

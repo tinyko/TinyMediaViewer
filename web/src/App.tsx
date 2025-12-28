@@ -241,7 +241,7 @@ function App() {
       <section className="section">
         <div className="controls condensed">
           <div className="controls__actions wide">
-            <div className="toggle-switch small sort-toggle">
+            <div className="toggle-switch mini sort-toggle">
               <div
                 className="toggle-indicator"
                 data-side={sortMode === "time" ? "left" : "right"}
@@ -268,25 +268,53 @@ function App() {
               onChange={(event) => setSearch(event.target.value)}
               className="search-input"
             />
-            <div className="toggle-switch small media-toggle">
-              <div
-                className="toggle-indicator"
-                data-side={mediaFilter === "image" ? "left" : "right"}
-              />
-              <button
-                className={`toggle-option ${mediaFilter === "image" ? "active" : ""}`}
-                onClick={() => setMediaFilter("image")}
-                aria-pressed={mediaFilter === "image"}
-              >
-                图片
-              </button>
-              <button
-                className={`toggle-option ${mediaFilter === "video" ? "active" : ""}`}
-                onClick={() => setMediaFilter("video")}
-                aria-pressed={mediaFilter === "video"}
-              >
-                视频
-              </button>
+            <div className="controls__cluster">
+              <div className="meter-pill" aria-label="媒体计数">
+                <div className="meter-pill__fill" style={{ width: `${meterPercent}%` }} />
+                <span className="meter-pill__text">
+                  {visibleCount} / {totalMedia} 媒体
+                </span>
+              </div>
+              <div className="toggle-switch tiny">
+                <div
+                  className="toggle-indicator"
+                  data-side={mediaSort === "asc" ? "left" : "right"}
+                />
+                <button
+                  className={`toggle-option ${mediaSort === "asc" ? "active" : ""}`}
+                  onClick={() => setMediaSort("asc")}
+                  aria-pressed={mediaSort === "asc"}
+                >
+                  按时间+
+                </button>
+                <button
+                  className={`toggle-option ${mediaSort === "desc" ? "active" : ""}`}
+                  onClick={() => setMediaSort("desc")}
+                  aria-pressed={mediaSort === "desc"}
+                >
+                  按时间-
+                </button>
+              </div>
+              <div className="toggle-switch small media-toggle">
+                <div
+                  className="toggle-indicator"
+                  data-side={mediaFilter === "image" ? "left" : "right"}
+                />
+                <button
+                  className={`toggle-option ${mediaFilter === "image" ? "active" : ""}`}
+                  onClick={() => setMediaFilter("image")}
+                  aria-pressed={mediaFilter === "image"}
+                >
+                  图片
+                </button>
+                <button
+                  className={`toggle-option ${mediaFilter === "video" ? "active" : ""}`}
+                  onClick={() => setMediaFilter("video")}
+                  aria-pressed={mediaFilter === "video"}
+                >
+                  视频
+                </button>
+              </div>
             </div>
             {loading && <span className="pill">加载中...</span>}
             {error && <span className="pill error">{error}</span>}
@@ -313,40 +341,9 @@ function App() {
             {!filteredAccounts.length && !loading && (
               <div className="empty">没有匹配的账号</div>
             )}
-          </div>
-
-            <div className="category-panel">
-              <div className="category-toolbar">
-                <div className="category-toolbar__meta">
-                  <div className="meter-pill" aria-label="媒体计数">
-                    <div className="meter-pill__fill" style={{ width: `${meterPercent}%` }} />
-                    <span className="meter-pill__text">
-                      {visibleCount} / {totalMedia} 媒体
-                    </span>
-                  </div>
-                </div>
-                <div className="toggle-switch tiny">
-                  <div
-                    className="toggle-indicator"
-                    data-side={mediaSort === "asc" ? "left" : "right"}
-                />
-                <button
-                  className={`toggle-option ${mediaSort === "asc" ? "active" : ""}`}
-                  onClick={() => setMediaSort("asc")}
-                  aria-pressed={mediaSort === "asc"}
-                >
-                  按时间+
-                </button>
-                <button
-                  className={`toggle-option ${mediaSort === "desc" ? "active" : ""}`}
-                  onClick={() => setMediaSort("desc")}
-                  aria-pressed={mediaSort === "desc"}
-                >
-                  按时间-
-                </button>
-              </div>
             </div>
 
+            <div className="category-panel">
             <div className="category-preview" ref={previewScrollRef}>
               {categoryLoading && <div className="empty">加载账号媒体...</div>}
               {categoryError && <div className="empty">{categoryError}</div>}
