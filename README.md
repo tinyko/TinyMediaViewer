@@ -9,7 +9,7 @@
 面向 `/Users/tiny/X` 媒体库的全栈预览工具。后端用 TypeScript + Fastify 快速扫描目录并输出带快照的结构化数据，前端用 Vite + React 提供“无需进入子目录就能看预览”的浏览体验。
 
 ## Demo
-<video src="https://raw.githubusercontent.com/tinyko/TinyMediaViewer/main/demo.mp4" controls width="720" style="max-width: 100%; height: auto;" poster="https://raw.githubusercontent.com/tinyko/TinyMediaViewer/main/demo.png"></video>
+<video src="https://github.com/user-attachments/assets/573d767a-5f63-4579-9cf5-be9127d8f108" controls width="720" style="max-width: 100%; height: auto;" poster="https://raw.githubusercontent.com/tinyko/TinyMediaViewer/main/demo.png"></video>
 
 ![Tiny Media Viewer 截图](./demo.png)
 
