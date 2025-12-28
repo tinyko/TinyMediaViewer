@@ -1,4 +1,10 @@
-# Tiny Media Viewer
+# TinyMediaViewer
+<p align="center">
+  <img alt="TinyMediaViewer v0.4.1" src="https://img.shields.io/badge/TinyMediaViewer-v0.4.1-2d76ff?style=for-the-badge">
+  <img alt="TypeScript 5.9.3" src="https://img.shields.io/badge/TypeScript-5.9.3-3178c6?style=for-the-badge&logo=typescript&logoColor=white">
+  <img alt="React 19.2.0" src="https://img.shields.io/badge/React-19.2.0-61dafb?style=for-the-badge&logo=react&logoColor=black">
+  <img alt="Fastify 5.6.2" src="https://img.shields.io/badge/Fastify-5.6.2-000000?style=for-the-badge&logo=fastify&logoColor=white">
+</p>
 
 面向 `/Users/tiny/X` 媒体库的全栈预览工具。后端用 TypeScript + Fastify 快速扫描目录并输出带快照的结构化数据，前端用 Vite + React 提供“无需进入子目录就能看预览”的浏览体验。
 
