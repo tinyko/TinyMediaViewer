@@ -1,6 +1,6 @@
 # TinyMediaViewer
 <p align="center">
-  <img alt="TinyMediaViewer v0.4.1" src="https://img.shields.io/badge/TinyMediaViewer-v0.4.1-2d76ff?style=for-the-badge">
+  <img alt="TinyMediaViewer v0.5.1" src="https://img.shields.io/badge/TinyMediaViewer-v0.5.1-2d76ff?style=for-the-badge">
   <img alt="TypeScript 5.9.3" src="https://img.shields.io/badge/TypeScript-5.9.3-3178c6?style=for-the-badge&logo=typescript&logoColor=white">
   <img alt="React 19.2.0" src="https://img.shields.io/badge/React-19.2.0-61dafb?style=for-the-badge&logo=react&logoColor=black">
   <img alt="Fastify 5.6.2" src="https://img.shields.io/badge/Fastify-5.6.2-000000?style=for-the-badge&logo=fastify&logoColor=white">

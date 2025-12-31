@@ -8,6 +8,12 @@ import { formatBytes, formatDate } from "./utils";
 type Theme = "light" | "dark";
 const CURSOR_OFFSET = { x: 0, y: 0 };
 const HEART_PULSE_OFFSET_Y = 0;
+const makeHeartCursor = (hue: number) => {
+  const color = `hsl(${hue},85%,70%)`;
+  const stroke = `hsl(${hue},90%,92%)`;
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'><path d='M16 29s-9-5.7-12-12c-3-6.3 4-13 12-5.5C24-1 31 5.7 28 12 25 18.3 16 29 16 29z' fill='${color}' stroke='${stroke}' stroke-width='1.6' stroke-linejoin='round'/></svg>`;
+  return `url(\"data:image/svg+xml,${encodeURIComponent(svg)}\") 16 16, auto`;
+};
 
 function App() {
   const getInitialTheme = (): Theme => {
@@ -36,6 +42,7 @@ function App() {
     y: 0,
     show: false,
   });
+  const [heartHue, setHeartHue] = useState(0);
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [manualTheme, setManualTheme] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -45,7 +52,7 @@ function App() {
   const categoryLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const hoveredCardRef = useRef<HTMLButtonElement | null>(null);
-  const versionLabel = "v0.5.0";
+  const versionLabel = "v0.5.1";
   const hoverPointRef = useRef<{ x: number; y: number } | null>(null);
 
   const filteredAccounts = useMemo(() => {
@@ -229,10 +236,17 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    const color = `hsl(${heartHue},85%,70%)`;
+    const cursor = makeHeartCursor(heartHue);
+    document.documentElement.style.setProperty("--cursor-heart", cursor);
+    document.documentElement.style.setProperty("--cursor-heart-fill", color);
+  }, [heartHue]);
+
   return (
     <div className="page">
       <ParticleField />
-      <HeartPulseLayer hoveredCardRef={hoveredCardRef} />
+      <HeartPulseLayer hoveredCardRef={hoveredCardRef} onHueChange={setHeartHue} />
       {heartCursor.show && (
         <div
           className="cursor-heart-overlay"
@@ -644,8 +658,10 @@ function ParticleField() {
 
 function HeartPulseLayer({
   hoveredCardRef,
+  onHueChange,
 }: {
   hoveredCardRef: RefObject<HTMLButtonElement | null>;
+  onHueChange: (hue: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
@@ -670,6 +686,7 @@ function HeartPulseLayer({
     const addHeart = (x: number, y: number) => {
       const heartY = y + HEART_PULSE_OFFSET_Y;
       const hue = Math.random() * 360;
+      onHueChange(hue);
       hearts.push({ x, y: heartY, progress: 0, hue });
       if (hearts.length > 120) hearts = hearts.slice(-120);
       // trigger a small particle burst synced with the heart beat

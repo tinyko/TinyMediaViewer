@@ -23,6 +23,7 @@ export function MediaPreviewModal({
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   let touchStartX: number | null = null;
+  const pointerStartX = useRef<number | null>(null);
 
   const handleTouchStart = (event: React.TouchEvent) => {
     touchStartX = event.touches[0]?.clientX ?? null;
@@ -34,6 +35,21 @@ export function MediaPreviewModal({
     if (deltaX > 50 && hasPrev) onPrev();
     if (deltaX < -50 && hasNext) onNext();
     touchStartX = null;
+  };
+
+  const handlePointerDown = (event: React.PointerEvent) => {
+    if (event.pointerType === "mouse") return;
+    pointerStartX.current = event.clientX;
+  };
+
+  const handlePointerUp = (event: React.PointerEvent) => {
+    if (event.pointerType === "mouse") return;
+    const start = pointerStartX.current;
+    if (start == null) return;
+    const deltaX = event.clientX - start;
+    if (deltaX > 50 && hasPrev) onPrev();
+    if (deltaX < -50 && hasNext) onNext();
+    pointerStartX.current = null;
   };
 
   const handleWheel = (event: React.WheelEvent) => {
@@ -88,6 +104,8 @@ export function MediaPreviewModal({
           className="modal__content"
           onTouchStart={handleTouchStart}
           onTouchEnd={handleTouchEnd}
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
         >
           {hasPrev && (
             <button className="nav-button left" onClick={onPrev} aria-label="上一张">
