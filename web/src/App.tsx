@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import "./App.css";
 import { fetchFolder } from "./api";
 import type { FolderPayload, MediaItem, MediaKind } from "./types";
@@ -6,6 +6,8 @@ import { MediaPreviewModal } from "./components/MediaPreviewModal";
 import { formatBytes, formatDate } from "./utils";
 
 type Theme = "light" | "dark";
+const CURSOR_OFFSET = { x: 0, y: 0 };
+const HEART_PULSE_OFFSET_Y = 0;
 
 function App() {
   const getInitialTheme = (): Theme => {
@@ -29,6 +31,11 @@ function App() {
   const [sortMode, setSortMode] = useState<"time" | "name">("time");
   const [mediaSort, setMediaSort] = useState<"asc" | "desc">("desc");
   const [showScrollTop, setShowScrollTop] = useState(false);
+  const [heartCursor, setHeartCursor] = useState<{ x: number; y: number; show: boolean }>({
+    x: 0,
+    y: 0,
+    show: false,
+  });
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [manualTheme, setManualTheme] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -37,7 +44,9 @@ function App() {
   const previewCache = useRef(new Map<string, FolderPayload>());
   const categoryLoadMoreRef = useRef<HTMLDivElement | null>(null);
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
-  const versionLabel = "v0.4.1";
+  const hoveredCardRef = useRef<HTMLButtonElement | null>(null);
+  const versionLabel = "v0.5.0";
+  const hoverPointRef = useRef<{ x: number; y: number } | null>(null);
 
   const filteredAccounts = useMemo(() => {
     if (!folder) return [];
@@ -204,8 +213,36 @@ function App() {
     return () => el.removeEventListener("scroll", onScroll);
   }, [categoryPreview, mediaFilter, sortMode, mediaSort]);
 
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      const x = event.clientX + CURSOR_OFFSET.x;
+      const y = event.clientY + CURSOR_OFFSET.y;
+      const target = (event.target as HTMLElement | null)?.closest(".heart-target");
+      setHeartCursor({ x, y, show: Boolean(target) });
+    };
+    const onLeave = () => setHeartCursor((prev) => (prev.show ? { ...prev, show: false } : prev));
+    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointerleave", onLeave);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerleave", onLeave);
+    };
+  }, []);
+
   return (
     <div className="page">
+      <ParticleField />
+      <HeartPulseLayer hoveredCardRef={hoveredCardRef} />
+      {heartCursor.show && (
+        <div
+          className="cursor-heart-overlay"
+          style={{
+            left: heartCursor.x,
+            top: heartCursor.y,
+            transform: "translate(-50%, -50%)",
+          }}
+        />
+      )}
       <div
         className={`microbar microbar--fixed ${
           selected ? "microbar--hidden" : ""
@@ -344,21 +381,40 @@ function App() {
             </div>
 
             <div className="category-panel">
-            <div className="category-preview" ref={previewScrollRef}>
-              {categoryLoading && <div className="empty">加载账号媒体...</div>}
-              {categoryError && <div className="empty">{categoryError}</div>}
-              {!categoryLoading && !categoryError && categoryPreview && (
-                <>
-                  <div className="media-grid">
-                    {visibleCategoryMedia.map((item) => (
-                      <button
-                        key={`${categoryPreview.folder.path}-${item.path}`}
-                        className="media-card"
-                        onClick={() => {
-                          setSelected(item);
-                        }}
-                        title={item.name}
-                      >
+              <div className="category-preview" ref={previewScrollRef}>
+                {categoryLoading && <div className="empty">加载账号媒体...</div>}
+                {categoryError && <div className="empty">{categoryError}</div>}
+                {!categoryLoading && !categoryError && categoryPreview && (
+                  <>
+            <div className="media-grid">
+              {visibleCategoryMedia.map((item) => (
+                <button
+                  key={`${categoryPreview.folder.path}-${item.path}`}
+                  className="media-card heart-target"
+                  onClick={() => {
+                    setSelected(item);
+                  }}
+                  onMouseEnter={(event) => {
+                    hoverPointRef.current = {
+                      x: event.clientX + CURSOR_OFFSET.x,
+                      y: event.clientY + CURSOR_OFFSET.y,
+                    };
+                    hoveredCardRef.current = event.currentTarget;
+                  }}
+                  onMouseMove={(event) => {
+                    hoverPointRef.current = {
+                      x: event.clientX + CURSOR_OFFSET.x,
+                      y: event.clientY + CURSOR_OFFSET.y,
+                    };
+                  }}
+                  onMouseLeave={(event) => {
+                    hoverPointRef.current = null;
+                    if (hoveredCardRef.current === event.currentTarget) {
+                      hoveredCardRef.current = null;
+                    }
+                    event.currentTarget.classList.remove("heart-beat");
+                  }}
+                >
                         {item.kind === "video" ? (
                           <video muted playsInline preload="metadata">
                             <source src={item.url} />
@@ -451,3 +507,273 @@ function App() {
 }
 
 export default App;
+
+function ParticleField() {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    type Shape = "circle" | "triangle" | "square";
+    let particles: Array<{
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      life: number;
+      size: number;
+      hue: number;
+      shape: Shape;
+      angle: number;
+    }> = [];
+    let raf = 0;
+
+    const resize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
+    resize();
+
+    const pushParticles = (x: number, y: number, count = 10, hueOverride?: number) => {
+      for (let i = 0; i < count; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = Math.random() * 2 + 0.5;
+        const shape: Shape = Math.random() < 0.5 ? "circle" : Math.random() < 0.5 ? "triangle" : "square";
+        particles.push({
+          x,
+          y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: Math.random() * 0.6 + 0.5,
+          size: Math.random() * 1.5 + 1,
+          hue: hueOverride ?? Math.random() * 360,
+          shape,
+          angle: Math.random() * Math.PI * 2,
+        });
+      }
+      if (particles.length > 800) {
+        particles = particles.slice(-800);
+      }
+    };
+
+    const handlePointer = (event: PointerEvent) => {
+      pushParticles(
+        event.clientX + CURSOR_OFFSET.x,
+        event.clientY + CURSOR_OFFSET.y,
+        8
+      );
+    };
+
+    const handleTouch = (event: TouchEvent) => {
+      const touch = event.touches[0];
+      if (touch) {
+        pushParticles(
+          touch.clientX + CURSOR_OFFSET.x,
+          touch.clientY + CURSOR_OFFSET.y,
+          8
+        );
+      }
+    };
+
+    const tick = () => {
+      const { width, height } = canvas;
+      ctx.clearRect(0, 0, width, height);
+      const next: typeof particles = [];
+      for (const p of particles) {
+        const life = p.life - 0.01;
+        if (life <= 0) continue;
+        const x = p.x + p.vx;
+        const y = p.y + p.vy;
+        ctx.globalAlpha = life;
+        ctx.fillStyle = `hsla(${p.hue}, 85%, 70%, ${life})`;
+        ctx.beginPath();
+        if (p.shape === "circle") {
+          ctx.arc(x, y, p.size, 0, Math.PI * 2);
+        } else if (p.shape === "square") {
+          const s = p.size * 1.6;
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(p.angle);
+          ctx.rect(-s / 2, -s / 2, s, s);
+          ctx.restore();
+        } else {
+          const s = p.size * 2;
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(p.angle);
+          ctx.moveTo(0, -s / 2);
+          ctx.lineTo(-s / 2, s / 2);
+          ctx.lineTo(s / 2, s / 2);
+          ctx.closePath();
+          ctx.restore();
+        }
+        ctx.fill();
+        next.push({ ...p, x, y, life });
+      }
+      particles = next;
+      raf = requestAnimationFrame(tick);
+    };
+
+    const handleBurst = (event: Event) => {
+      const detail = (event as CustomEvent<{ x: number; y: number; count?: number; hue?: number }>).detail;
+      if (detail) {
+        pushParticles(detail.x, detail.y, detail.count ?? 8, detail.hue);
+      }
+    };
+
+    window.addEventListener("resize", resize);
+    window.addEventListener("pointermove", handlePointer, { passive: true });
+    window.addEventListener("touchmove", handleTouch, { passive: true });
+    canvas.addEventListener("particle-burst", handleBurst as EventListener);
+    raf = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+      window.removeEventListener("pointermove", handlePointer);
+      window.removeEventListener("touchmove", handleTouch);
+      canvas.removeEventListener("particle-burst", handleBurst as EventListener);
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="particle-layer" aria-hidden />;
+}
+
+function HeartPulseLayer({
+  hoveredCardRef,
+}: {
+  hoveredCardRef: RefObject<HTMLButtonElement | null>;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const hoverTimerRef = useRef<number | null>(null);
+  const hoverPointRef = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    let hearts: Array<{ x: number; y: number; progress: number; hue: number }> =
+      [];
+    let raf = 0;
+
+    const resize = () => {
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+    };
+    resize();
+
+    const addHeart = (x: number, y: number) => {
+      const heartY = y + HEART_PULSE_OFFSET_Y;
+      const hue = Math.random() * 360;
+      hearts.push({ x, y: heartY, progress: 0, hue });
+      if (hearts.length > 120) hearts = hearts.slice(-120);
+      // trigger a small particle burst synced with the heart beat
+      const particleCanvas = document.querySelector(".particle-layer") as HTMLCanvasElement | null;
+      if (particleCanvas) {
+        const evt = new CustomEvent("particle-burst", { detail: { x, y, count: 60, hue } });
+        particleCanvas.dispatchEvent(evt);
+      }
+      const card = hoveredCardRef.current;
+      if (card) {
+        const border = `hsl(${hue},85%,70%)`;
+        const shadowStrong = `hsla(${hue},85%,70%,0.25)`;
+        const shadowMid = `hsla(${hue},85%,70%,0.18)`;
+        const shadowWeak = `hsla(${hue},85%,70%,0.12)`;
+        card.style.setProperty("--heart-border", border);
+        card.style.setProperty("--heart-shadow-strong", shadowStrong);
+        card.style.setProperty("--heart-shadow-mid", shadowMid);
+        card.style.setProperty("--heart-shadow-weak", shadowWeak);
+        card.classList.remove("heart-beat");
+        // force reflow to restart animation
+        void card.offsetWidth;
+        card.classList.add("heart-beat");
+      }
+    };
+
+    const startHoverPulse = (x: number, y: number) => {
+      if (hoverTimerRef.current) {
+        return;
+      }
+      addHeart(x, y);
+      hoverTimerRef.current = window.setInterval(() => {
+        const point = hoverPointRef.current ?? { x, y };
+        addHeart(point.x, point.y);
+      }, 700);
+    };
+
+    const stopHoverPulse = () => {
+      if (hoverTimerRef.current) {
+        window.clearInterval(hoverTimerRef.current);
+      }
+      hoverTimerRef.current = null;
+    };
+
+    const onPointer = (event: PointerEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      const isHeart = target.closest(".heart-target");
+      const x = event.clientX + CURSOR_OFFSET.x;
+      const y = event.clientY + CURSOR_OFFSET.y;
+      hoverPointRef.current = { x, y };
+      if (isHeart) {
+        if (!hoverTimerRef.current) {
+          startHoverPulse(x, y);
+        }
+      } else {
+        hoverPointRef.current = null;
+        stopHoverPulse();
+      }
+    };
+
+    const drawHeart = (x: number, y: number, size: number) => {
+      const s = size;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.beginPath();
+      ctx.moveTo(0, -0.6 * s);
+      ctx.bezierCurveTo(-s, -0.8 * s, -1.2 * s, -0.1 * s, -0.1 * s, 0.9 * s);
+      ctx.bezierCurveTo(1.2 * s, -0.1 * s, s, -0.8 * s, 0, -0.6 * s);
+      ctx.closePath();
+      ctx.restore();
+    };
+
+    const tick = () => {
+      const { width, height } = canvas;
+      ctx.clearRect(0, 0, width, height);
+      const next: typeof hearts = [];
+      for (const h of hearts) {
+        const p = h.progress + 0.02;
+        if (p >= 1) continue;
+        const scale = 16 + 36 * p;
+        ctx.beginPath();
+        drawHeart(h.x, h.y, scale);
+        ctx.strokeStyle = `hsla(${h.hue}, 85%, 70%, ${1 - p})`;
+        ctx.lineWidth = 2 * (1 - p * 0.6);
+        ctx.stroke();
+        next.push({ ...h, progress: p });
+      }
+      hearts = next;
+      raf = requestAnimationFrame(tick);
+    };
+
+    window.addEventListener("resize", resize);
+    window.addEventListener("pointermove", onPointer, { passive: true });
+    window.addEventListener("pointerenter", onPointer, { passive: true });
+    raf = requestAnimationFrame(tick);
+
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+      window.removeEventListener("pointermove", onPointer);
+      window.removeEventListener("pointerenter", onPointer);
+      stopHoverPulse();
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="heart-layer" aria-hidden />;
+}

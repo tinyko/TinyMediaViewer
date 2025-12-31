@@ -93,6 +93,37 @@
   transform: translateY(-120%);
 }
 
+.particle-layer {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 999;
+  mix-blend-mode: screen;
+}
+
+.cursor-heart-overlay {
+  position: fixed;
+  width: 32px;
+  height: 32px;
+  margin-left: 0;
+  margin-top: 0;
+  background: var(--cursor-heart) no-repeat center center / contain;
+  pointer-events: none;
+  z-index: 1000;
+  transform: translate(-50%, -50%);
+}
+
+.heart-layer {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 998;
+}
+
 .microbar__left,
 .microbar__right {
   display: flex;
@@ -103,6 +134,24 @@
 .microbar__right {
   color: var(--muted);
   font-size: 13px;
+}
+
+button,
+a,
+.media-card,
+.media-card *,
+.scroll-top,
+.nav-button,
+.close-button,
+.primary-button,
+.ghost-button,
+.toggle-option {
+  cursor: var(--cursor-horn) !important;
+}
+
+.media-card:hover,
+.media-card:hover * {
+  cursor: var(--cursor-heart) !important;
 }
 
 .microbar__version {
@@ -215,6 +264,16 @@
   align-items: center;
   gap: 6px;
   margin-left: auto;
+}
+
+@supports not (gap: 1rem) {
+  .controls__actions > * + * {
+    margin-left: 12px;
+  }
+
+  .controls__cluster > * + * {
+    margin-left: 6px;
+  }
 }
 
 .toolbar__filters.inline {
@@ -495,9 +554,10 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   cursor: pointer;
   min-width: 0;
+  position: relative;
 }
 
 .media-card img,
@@ -507,6 +567,31 @@
   object-fit: cover;
   border-radius: 10px;
   background: var(--overlay-panel);
+}
+
+.media-card.heart-beat {
+  animation: cardBeat 0.7s ease-out;
+  border-color: var(--heart-border, var(--accent));
+  box-shadow: 0 0 0 6px var(--heart-shadow-strong, rgba(255, 79, 139, 0.25));
+}
+
+@keyframes cardBeat {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 0 0 6px var(--heart-shadow-strong, rgba(255, 79, 139, 0.25));
+  }
+  40% {
+    transform: scale(1.05);
+    box-shadow: 0 0 0 10px var(--heart-shadow-mid, rgba(255, 79, 139, 0.18));
+  }
+  70% {
+    transform: scale(1.02);
+    box-shadow: 0 0 0 4px var(--heart-shadow-weak, rgba(255, 79, 139, 0.12));
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 4px var(--heart-shadow-weak, rgba(255, 79, 139, 0));
+  }
 }
 
 .media-card:hover {

@@ -17,7 +17,6 @@ const renderPreview = (item: MediaItem, onPreview: (item: MediaItem) => void) =>
           event.stopPropagation();
           onPreview(item);
         }}
-        title={item.name}
       >
         <video muted playsInline preload="metadata">
           <source src={item.url} />
@@ -33,7 +32,6 @@ const renderPreview = (item: MediaItem, onPreview: (item: MediaItem) => void) =>
         event.stopPropagation();
         onPreview(item);
       }}
-      title={item.name}
     >
       <img src={item.url} alt={item.name} loading="lazy" />
     </button>
