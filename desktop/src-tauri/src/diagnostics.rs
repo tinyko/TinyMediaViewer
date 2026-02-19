@@ -73,8 +73,12 @@ pub struct DiagnosticsStore {
 
 impl DiagnosticsStore {
     pub fn new(dir: PathBuf) -> Result<Self, String> {
-        fs::create_dir_all(&dir)
-            .map_err(|error| format!("Failed to create diagnostics dir {}: {error}", dir.display()))?;
+        fs::create_dir_all(&dir).map_err(|error| {
+            format!(
+                "Failed to create diagnostics dir {}: {error}",
+                dir.display()
+            )
+        })?;
 
         let events_path = dir.join(EVENTS_FILENAME);
         let gateway_log_path = dir.join(GATEWAY_LOG_FILENAME);
@@ -107,10 +111,7 @@ impl DiagnosticsStore {
         }
     }
 
-    pub fn record_preview_events(
-        &self,
-        mut events: Vec<PreviewDiagEvent>,
-    ) -> Result<(), String> {
+    pub fn record_preview_events(&self, mut events: Vec<PreviewDiagEvent>) -> Result<(), String> {
         if events.is_empty() {
             return Ok(());
         }
@@ -232,14 +233,24 @@ fn append_jsonl(path: &PathBuf, events: &[PreviewDiagEvent]) -> Result<(), Strin
         .create(true)
         .append(true)
         .open(path)
-        .map_err(|error| format!("Failed to open diagnostics file {}: {error}", path.display()))?;
+        .map_err(|error| {
+            format!(
+                "Failed to open diagnostics file {}: {error}",
+                path.display()
+            )
+        })?;
 
     for event in events {
         let line = serde_json::to_string(event)
             .map_err(|error| format!("Failed serializing diagnostics event: {error}"))?;
         file.write_all(line.as_bytes())
             .and_then(|_| file.write_all(b"\n"))
-            .map_err(|error| format!("Failed writing diagnostics file {}: {error}", path.display()))?;
+            .map_err(|error| {
+                format!(
+                    "Failed writing diagnostics file {}: {error}",
+                    path.display()
+                )
+            })?;
     }
 
     Ok(())
@@ -288,7 +299,10 @@ fn classify_root_cause(events: &[PreviewDiagEvent]) -> Option<String> {
                 requests.insert(request_id, event.ts);
             }
             PreviewDiagPhase::Response => {
-                responses.insert(request_id.clone(), (event.ts, event.status, event.batch_size));
+                responses.insert(
+                    request_id.clone(),
+                    (event.ts, event.status, event.batch_size),
+                );
                 terminals.insert(request_id, event.ts);
             }
             PreviewDiagPhase::Apply => {
@@ -302,10 +316,9 @@ fn classify_root_cause(events: &[PreviewDiagEvent]) -> Option<String> {
     }
 
     // Rule 1: enqueue exists but no request in 2s.
-    if enqueues
-        .iter()
-        .any(|(request_id, enqueue_ts)| now.saturating_sub(*enqueue_ts) > 2_000 && !requests.contains_key(request_id))
-    {
+    if enqueues.iter().any(|(request_id, enqueue_ts)| {
+        now.saturating_sub(*enqueue_ts) > 2_000 && !requests.contains_key(request_id)
+    }) {
         return Some("frontend-trigger-chain-failure".to_string());
     }
 
@@ -325,12 +338,15 @@ fn classify_root_cause(events: &[PreviewDiagEvent]) -> Option<String> {
     }
 
     // Rule 3: response 200 and items>0 but apply missing.
-    if responses.iter().any(|(request_id, (response_ts, status, item_count))| {
-        status == &Some(200)
-            && *item_count > 0
-            && now.saturating_sub(*response_ts) > 2_000
-            && !applies.contains_key(request_id)
-    }) {
+    if responses
+        .iter()
+        .any(|(request_id, (response_ts, status, item_count))| {
+            status == &Some(200)
+                && *item_count > 0
+                && now.saturating_sub(*response_ts) > 2_000
+                && !applies.contains_key(request_id)
+        })
+    {
         return Some("state-apply-failure".to_string());
     }
 

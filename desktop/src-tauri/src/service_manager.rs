@@ -5,9 +5,10 @@ use crate::{
 };
 use std::{
     fs,
+    fs::OpenOptions,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     process::Stdio,
     sync::Arc,
@@ -48,18 +49,21 @@ impl ServiceManager {
         ensure_executable(&sidecar_path)?;
         let media_access_token = build_media_access_token(api_port);
         let diagnostics_dir = self.diagnostics.diagnostics_dir();
+        let stdout_log = open_sidecar_log(&diagnostics_dir, "sidecar.stdout.log")?;
+        let stderr_log = open_sidecar_log(&diagnostics_dir, "sidecar.stderr.log")?;
 
         let child = tokio::process::Command::new(&sidecar_path)
             .env("MEDIA_ROOT", &settings.home_dir)
             .env("PORT", api_port.to_string())
             .env("SERVER_HOST", "127.0.0.1")
+            .env("TMV_PARENT_PID", std::process::id().to_string())
             .env("MEDIA_ACCESS_TOKEN", &media_access_token)
             .env("REQUIRE_LAN_TOKEN", "true")
             .env("TMV_DIAGNOSTICS_DIR", diagnostics_dir)
             .kill_on_drop(true)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log))
             .spawn()
             .map_err(|error| {
                 format!(
@@ -258,22 +262,40 @@ fn copy_sidecar_to_runtime_bin(app: &AppHandle, source: &PathBuf) -> Result<Path
     fs::create_dir_all(&runtime_bin_dir)
         .map_err(|error| format!("Failed to create runtime bin dir: {error}"))?;
 
-    let destination = runtime_bin_dir.join(SIDECAR_NAME);
-    // Always overwrite the runtime sidecar so DMG upgrades never keep stale binaries.
-    fs::copy(source, &destination).map_err(|error| {
+    cleanup_old_runtime_sidecars(&runtime_bin_dir, 8)?;
+
+    let destination = runtime_bin_dir.join(format!("{SIDECAR_NAME}-{}", std::process::id()));
+    let temp_destination = runtime_bin_dir.join(format!(
+        "{SIDECAR_NAME}-{}.tmp-{}",
+        std::process::id(),
+        build_tmp_suffix()
+    ));
+
+    // Copy to a temp file first, then atomically rename into place.
+    fs::copy(source, &temp_destination).map_err(|error| {
         format!(
             "Failed to copy sidecar from {} to {}: {error}",
             source.display(),
-            destination.display()
+            temp_destination.display()
         )
     })?;
 
-    let mut permissions = fs::metadata(&destination)
+    let mut permissions = fs::metadata(&temp_destination)
         .map_err(|error| format!("Failed to read runtime sidecar metadata: {error}"))?
         .permissions();
     permissions.set_mode(0o755);
-    fs::set_permissions(&destination, permissions)
+    fs::set_permissions(&temp_destination, permissions)
         .map_err(|error| format!("Failed to set runtime sidecar executable bit: {error}"))?;
+
+    ad_hoc_codesign(&temp_destination)?;
+
+    fs::rename(&temp_destination, &destination).map_err(|error| {
+        format!(
+            "Failed to finalize runtime sidecar {} -> {}: {error}",
+            temp_destination.display(),
+            destination.display()
+        )
+    })?;
 
     Ok(destination)
 }
@@ -319,4 +341,85 @@ fn build_media_access_token(api_port: u16) -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     format!("tmv-{api_port}-{pid}-{now_nanos}", pid = std::process::id())
+}
+
+fn build_tmp_suffix() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0)
+}
+
+fn cleanup_old_runtime_sidecars(dir: &Path, keep: usize) -> Result<(), String> {
+    let mut sidecars = fs::read_dir(dir)
+        .map_err(|error| format!("Failed to read runtime bin dir {}: {error}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(SIDECAR_NAME)
+        })
+        .collect::<Vec<_>>();
+
+    if sidecars.len() <= keep {
+        return Ok(());
+    }
+
+    sidecars.sort_by_key(|entry| {
+        entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .unwrap_or(SystemTime::UNIX_EPOCH)
+    });
+
+    let remove_count = sidecars.len().saturating_sub(keep);
+    for entry in sidecars.into_iter().take(remove_count) {
+        let _ = fs::remove_file(entry.path());
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn ad_hoc_codesign(path: &Path) -> Result<(), String> {
+    let output = Command::new("/usr/bin/codesign")
+        .args(["--force", "--sign", "-", "--timestamp=none"])
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Failed to invoke codesign for {}: {error}", path.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Err(format!(
+        "Failed to ad-hoc sign runtime sidecar {}: status={} stderr={} stdout={}",
+        path.display(),
+        output.status,
+        stderr,
+        stdout
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ad_hoc_codesign(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn open_sidecar_log(dir: &Path, filename: &str) -> Result<std::fs::File, String> {
+    fs::create_dir_all(dir).map_err(|error| {
+        format!(
+            "Failed to create diagnostics dir {}: {error}",
+            dir.display()
+        )
+    })?;
+    let path = dir.join(filename);
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("Failed to open sidecar log {}: {error}", path.display()))
 }

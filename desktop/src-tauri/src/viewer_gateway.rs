@@ -201,7 +201,7 @@ async fn proxy_to_api(State(state): State<GatewayState>, request: Request) -> Re
                 &trace_id,
                 route_tag,
                 None,
-            )
+            );
         }
     };
 
@@ -239,7 +239,7 @@ async fn proxy_to_api(State(state): State<GatewayState>, request: Request) -> Re
                 &trace_id,
                 route_tag,
                 None,
-            )
+            );
         }
     };
 
