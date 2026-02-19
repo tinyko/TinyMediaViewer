@@ -5,3 +5,10 @@ web/node_modules
 web/dist
 server/node_modules
 server/dist
+desktop/node_modules
+desktop/dist
+desktop/src-tauri/target
+desktop/src-tauri/resources/viewer
+desktop/src-tauri/binaries
+server/.tmp
+server/perf-reports

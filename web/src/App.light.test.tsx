@@ -1,0 +1,177 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import App from "./App";
+import { fetchFolder, fetchFolderPreviews } from "./api";
+import type {
+  FolderPayload,
+  FolderPreviewBatchOutput,
+  MediaItem,
+} from "./types";
+
+vi.mock("./api", () => ({
+  fetchFolder: vi.fn(),
+  fetchFolderPreviews: vi.fn(),
+}));
+
+const mockedFetchFolder = vi.mocked(fetchFolder);
+const mockedFetchFolderPreviews = vi.mocked(fetchFolderPreviews);
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+};
+
+const makeMedia = (name: string, kind: MediaItem["kind"]): MediaItem => ({
+  name,
+  path: `alpha/${name}`,
+  url: `/media/alpha/${name}`,
+  kind,
+  size: 1024,
+  modified: Date.now(),
+});
+
+const makeLightRootPayload = (): FolderPayload => ({
+  folder: { name: "root", path: "" },
+  breadcrumb: [{ name: "root", path: "" }],
+  subfolders: [
+    {
+      name: "alpha",
+      path: "alpha",
+      modified: 100,
+      counts: { images: 0, gifs: 0, videos: 0, subfolders: 0 },
+      previews: [],
+      countsReady: false,
+      previewReady: false,
+      approximate: true,
+    },
+    {
+      name: "beta",
+      path: "beta",
+      modified: 90,
+      counts: { images: 0, gifs: 0, videos: 0, subfolders: 0 },
+      previews: [],
+      countsReady: false,
+      previewReady: false,
+      approximate: true,
+    },
+  ],
+  media: [],
+  totals: { media: 0, subfolders: 2 },
+});
+
+const makeCategoryPayload = (path: string): FolderPayload => ({
+  folder: { name: path, path },
+  breadcrumb: [
+    { name: "root", path: "" },
+    { name: path, path },
+  ],
+  subfolders: [],
+  media: [makeMedia("IMG_20260219_120000.jpg", "image")],
+  totals: { media: 1, subfolders: 0 },
+});
+
+describe("App root light mode + preview backfill", () => {
+  beforeEach(() => {
+    mockedFetchFolder.mockReset();
+    mockedFetchFolderPreviews.mockReset();
+  });
+
+  it("loads root with mode=light and backfills counts via preview batch API", async () => {
+    const previewOutput: FolderPreviewBatchOutput = {
+      items: [
+        {
+          name: "alpha",
+          path: "alpha",
+          modified: 100,
+          counts: { images: 2, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [makeMedia("A.jpg", "image")],
+          countsReady: true,
+          previewReady: true,
+        },
+        {
+          name: "beta",
+          path: "beta",
+          modified: 90,
+          counts: { images: 0, gifs: 1, videos: 1, subfolders: 0 },
+          previews: [makeMedia("B.gif", "gif"), makeMedia("B.mp4", "video")],
+          countsReady: true,
+          previewReady: true,
+        },
+      ],
+    };
+
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        expect(options?.mode).toBe("light");
+        return Promise.resolve(makeLightRootPayload());
+      }
+      return Promise.resolve(makeCategoryPayload(targetPath));
+    });
+    mockedFetchFolderPreviews.mockResolvedValue(previewOutput);
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: /alpha/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /beta/i })).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(mockedFetchFolderPreviews).toHaveBeenCalled();
+    });
+    await waitFor(() => {
+      expect(screen.getByText("🖼️ 2")).toBeInTheDocument();
+      expect(screen.getByText("🎞️ 1")).toBeInTheDocument();
+    });
+  });
+
+  it("keeps items when countsReady=false and filters precisely after backfill", async () => {
+    const previewDeferred = deferred<FolderPreviewBatchOutput>();
+
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        expect(options?.mode).toBe("light");
+        return Promise.resolve({
+          ...makeLightRootPayload(),
+          subfolders: [makeLightRootPayload().subfolders[0]],
+          totals: { media: 0, subfolders: 1 },
+        });
+      }
+      return Promise.resolve(makeCategoryPayload(targetPath));
+    });
+    mockedFetchFolderPreviews.mockReturnValue(previewDeferred.promise);
+
+    render(<App />);
+
+    const alphaButton = await screen.findByRole("button", { name: /alpha/i });
+    expect(alphaButton).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "视频" }));
+    expect(screen.getByRole("button", { name: /alpha/i })).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(mockedFetchFolderPreviews).toHaveBeenCalled();
+    });
+
+    previewDeferred.resolve({
+      items: [
+        {
+          name: "alpha",
+          path: "alpha",
+          modified: 100,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [makeMedia("A.jpg", "image")],
+          countsReady: true,
+          previewReady: true,
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /alpha/i })).not.toBeInTheDocument();
+    });
+  });
+});

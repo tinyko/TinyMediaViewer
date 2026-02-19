@@ -1,0 +1,122 @@
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  z-index: 20;
+}
+
+.modal {
+  background: var(--overlay);
+  color: var(--overlay-text);
+  border-radius: 6px;
+  width: 95vw;
+  height: 95vh;
+  max-width: none;
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0;
+  border: 1px solid var(--nav-btn-border);
+  box-shadow: 0 10px 32px var(--shadow);
+  position: relative;
+}
+
+.modal__content {
+  background: var(--overlay-panel);
+  border-radius: 8px;
+  padding: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  position: relative;
+  overflow: hidden;
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  touch-action: pan-y;
+}
+
+.modal__media {
+  height: 100%;
+  width: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+  display: block;
+}
+
+.close-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: var(--nav-btn-bg);
+  color: var(--overlay-text);
+  border: 1px solid var(--nav-btn-border);
+  border-radius: 999px;
+  width: 32px;
+  height: 32px;
+  font-size: 18px;
+  cursor: pointer;
+}
+
+.modal__footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 4px 4px;
+  color: var(--overlay-text);
+  background: var(--overlay);
+  border-top: 1px solid var(--nav-btn-border);
+}
+
+.modal__footer.compact {
+  padding: 4px 4px 4px;
+}
+
+.media-footer-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.media-footer-text .media-title {
+  color: var(--overlay-text);
+}
+
+.footer-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.nav-button {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--nav-btn-bg);
+  color: var(--overlay-text);
+  border: 1px solid var(--nav-btn-border);
+  border-radius: 999px;
+  width: 40px;
+  height: 40px;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nav-button.left {
+  left: 10px;
+}
+
+.nav-button.right {
+  right: 10px;
+}

@@ -1,0 +1,199 @@
+:root {
+  color-scheme: dark;
+  font-family: "SF Pro Text", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border-radius: 16px;
+  overflow: hidden;
+}
+
+body {
+  color: #e5ebf8;
+}
+
+.container {
+  height: 100%;
+  padding: 12px;
+  background: radial-gradient(circle at 10% 10%, rgba(53, 126, 255, 0.24), transparent 45%),
+    radial-gradient(circle at 88% 100%, rgba(108, 255, 214, 0.14), transparent 40%),
+    rgba(10, 16, 28, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 16px;
+  backdrop-filter: blur(28px);
+  overflow: auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: 0.2px;
+}
+
+.subtitle {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #a9b4cc;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+.status-running {
+  background: rgba(16, 185, 129, 0.2);
+  color: #7df5ce;
+}
+
+.status-starting {
+  background: rgba(59, 130, 246, 0.2);
+  color: #b8d9ff;
+}
+
+.status-stopped,
+.status-error {
+  background: rgba(220, 38, 38, 0.18);
+  color: #fecaca;
+}
+
+.panel {
+  background: rgba(11, 20, 34, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 10px;
+}
+
+label,
+h2,
+p,
+code {
+  margin: 0;
+}
+
+label {
+  font-size: 12px;
+  color: #c7d2e9;
+}
+
+.input-with-action {
+  display: flex;
+  gap: 8px;
+}
+
+input[type="text"],
+input[type="number"],
+input:not([type]) {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #f8fbff;
+  outline: none;
+}
+
+input:focus {
+  border-color: rgba(80, 175, 255, 0.95);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #d4dcf0;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+button {
+  border: 1px solid rgba(86, 167, 255, 0.8);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(70, 150, 255, 0.95), rgba(36, 114, 238, 0.9));
+  color: #ffffff;
+  padding: 7px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+button.secondary {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.08);
+  color: #dbe9ff;
+}
+
+button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.runtime h2 {
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: #d6e2f8;
+}
+
+.runtime p {
+  margin: 5px 0;
+  font-size: 12px;
+  color: #c4d0e7;
+  line-height: 1.4;
+}
+
+code {
+  color: #f8fbff;
+  background: rgba(255, 255, 255, 0.09);
+  border-radius: 6px;
+  padding: 1px 5px;
+  user-select: text;
+}
+
+.message {
+  margin: 0;
+  font-size: 12px;
+  color: #74f0cc;
+}
+
+.error {
+  margin: 0;
+  font-size: 12px;
+  color: #ffc4c4;
+}

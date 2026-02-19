@@ -1,7 +1,5 @@
-@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap");
-
 :root {
-  font-family: "Manrope", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.6;
   font-weight: 400;
   color: #0f172a;

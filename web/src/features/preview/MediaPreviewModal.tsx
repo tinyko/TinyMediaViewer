@@ -1,6 +1,14 @@
-import type { MediaItem } from "../types";
-import { formatBytes, formatDate } from "../utils";
-import { useEffect, useRef } from "react";
+import {
+  useEffect,
+  useRef,
+  type KeyboardEvent,
+  type PointerEvent,
+  type TouchEvent,
+  type WheelEvent,
+} from "react";
+import type { MediaItem } from "../../types";
+import { formatBytes, formatDate } from "../../utils";
+import "./preview.css";
 
 interface Props {
   media: MediaItem | null;
@@ -19,30 +27,35 @@ export function MediaPreviewModal({
   hasPrev,
   hasNext,
 }: Props) {
-  if (!media) return null;
-
   const containerRef = useRef<HTMLDivElement | null>(null);
-  let touchStartX: number | null = null;
+  const touchStartX = useRef<number | null>(null);
   const pointerStartX = useRef<number | null>(null);
 
-  const handleTouchStart = (event: React.TouchEvent) => {
-    touchStartX = event.touches[0]?.clientX ?? null;
+  useEffect(() => {
+    if (!media) return;
+    containerRef.current?.focus();
+  }, [media]);
+
+  if (!media) return null;
+
+  const handleTouchStart = (event: TouchEvent<HTMLDivElement>) => {
+    touchStartX.current = event.touches[0]?.clientX ?? null;
   };
 
-  const handleTouchEnd = (event: React.TouchEvent) => {
-    if (touchStartX === null) return;
-    const deltaX = (event.changedTouches[0]?.clientX ?? 0) - touchStartX;
+  const handleTouchEnd = (event: TouchEvent<HTMLDivElement>) => {
+    if (touchStartX.current === null) return;
+    const deltaX = (event.changedTouches[0]?.clientX ?? 0) - touchStartX.current;
     if (deltaX > 50 && hasPrev) onPrev();
     if (deltaX < -50 && hasNext) onNext();
-    touchStartX = null;
+    touchStartX.current = null;
   };
 
-  const handlePointerDown = (event: React.PointerEvent) => {
+  const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse") return;
     pointerStartX.current = event.clientX;
   };
 
-  const handlePointerUp = (event: React.PointerEvent) => {
+  const handlePointerUp = (event: PointerEvent<HTMLDivElement>) => {
     if (event.pointerType === "mouse") return;
     const start = pointerStartX.current;
     if (start == null) return;
@@ -52,7 +65,7 @@ export function MediaPreviewModal({
     pointerStartX.current = null;
   };
 
-  const handleWheel = (event: React.WheelEvent) => {
+  const handleWheel = (event: WheelEvent<HTMLDivElement>) => {
     const horizontal = event.deltaX;
     const vertical = event.deltaY;
     const delta = Math.abs(horizontal) >= Math.abs(vertical) ? horizontal : vertical;
@@ -65,11 +78,7 @@ export function MediaPreviewModal({
     }
   };
 
-  useEffect(() => {
-    containerRef.current?.focus();
-  }, [media?.path]);
-
-  const handleKeyDown = (event: React.KeyboardEvent) => {
+  const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.key === "ArrowLeft" && hasPrev) {
       event.preventDefault();
       onPrev();
@@ -85,7 +94,7 @@ export function MediaPreviewModal({
     <div
       className="modal-backdrop"
       onClick={onClose}
-      onTouchMove={(e) => e.preventDefault()}
+      onTouchMove={(event) => event.preventDefault()}
     >
       <div
         className="modal immersive"

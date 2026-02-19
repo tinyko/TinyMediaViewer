@@ -20,16 +20,28 @@ export interface FolderPreview {
     subfolders: number;
   };
   previews: MediaItem[];
+  countsReady: boolean;
+  previewReady: boolean;
+  approximate?: boolean;
 }
 
 export interface FolderPayload {
   folder: {
     name: string;
     path: string;
-    absolutePath: string;
   };
   breadcrumb: { name: string; path: string }[];
   subfolders: FolderPreview[];
   media: MediaItem[];
   totals: { media: number; subfolders: number };
+  nextCursor?: string;
+}
+
+export interface FolderPreviewBatchInput {
+  paths: string[];
+  limitPerFolder?: number;
+}
+
+export interface FolderPreviewBatchOutput {
+  items: Array<FolderPreview & { countsReady: true; previewReady: true }>;
 }
