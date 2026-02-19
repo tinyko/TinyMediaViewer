@@ -43,6 +43,18 @@ export interface FolderPayload {
   nextCursor?: string;
 }
 
+export interface FolderPreviewBatchError {
+  path: string;
+  error: string;
+}
+
+export interface FolderPreviewBatchResult {
+  items: FolderPreview[];
+  errors: FolderPreviewBatchError[];
+  slowestPath?: string;
+  slowestMs: number;
+}
+
 export interface FolderSnapshot {
   folder: {
     name: string;
@@ -195,7 +207,7 @@ export class MediaScanner {
   async getFolderPreviews(
     paths: string[],
     limitPerFolder?: number
-  ): Promise<FolderPreview[]> {
+  ): Promise<FolderPreviewBatchResult> {
     const uniquePaths = Array.from(
       new Set(
         paths
@@ -210,19 +222,59 @@ export class MediaScanner {
       Math.max(this.previewLimit * 4, this.previewLimit)
     );
 
-    const previews = await mapWithConcurrency(
+    const results = await mapWithConcurrency(
       uniquePaths,
       clamp(Math.floor(this.statConcurrency / 2), 2, 8),
       async (relativePath) => {
+        const startedAt = Date.now();
         try {
-          return await this.getFolderPreview(relativePath, normalizedLimit);
-        } catch {
-          return null;
+          const preview = await this.getFolderPreview(relativePath, normalizedLimit);
+          return {
+            path: relativePath,
+            elapsedMs: Date.now() - startedAt,
+            preview,
+            error: undefined,
+          };
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Unable to build folder preview";
+          return {
+            path: relativePath,
+            elapsedMs: Date.now() - startedAt,
+            preview: undefined,
+            error: message,
+          };
         }
       }
     );
 
-    return previews.filter((item): item is FolderPreview => Boolean(item));
+    const items: FolderPreview[] = [];
+    const errors: FolderPreviewBatchError[] = [];
+    let slowestPath: string | undefined;
+    let slowestMs = 0;
+
+    for (const result of results) {
+      if (result.elapsedMs > slowestMs) {
+        slowestMs = result.elapsedMs;
+        slowestPath = result.path;
+      }
+
+      if (result.preview) {
+        items.push(result.preview);
+      } else if (result.error) {
+        errors.push({
+          path: result.path,
+          error: result.error,
+        });
+      }
+    }
+
+    return {
+      items,
+      errors,
+      slowestPath,
+      slowestMs,
+    };
   }
 
   resolveMediaFile(relativePath: string) {

@@ -2,6 +2,7 @@ import type {
   FolderPayload,
   FolderPreviewBatchInput,
   FolderPreviewBatchOutput,
+  PreviewDiagEventsInput,
 } from "./types";
 
 interface FetchFolderOptions {
@@ -67,4 +68,20 @@ export async function fetchFolderPreviews(
   }
 
   return response.json();
+}
+
+export async function postPreviewDiagnostics(
+  input: PreviewDiagEventsInput
+): Promise<void> {
+  if (!input.events.length) return;
+  await fetch("/__tmv/diag/preview", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+    keepalive: true,
+  }).catch(() => {
+    // Diagnostics transport failures should not affect viewer behavior.
+  });
 }

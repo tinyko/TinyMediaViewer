@@ -10,6 +10,8 @@ export async function registerRoutes(
   scanner: MediaScanner,
   appConfig: AppConfig
 ) {
+  const diagnosticsDir = process.env.TMV_DIAGNOSTICS_DIR?.trim() || "";
+
   fastify.get("/health", async () => ({ status: "ok" }));
 
   const guardRequest = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -92,8 +94,37 @@ export async function registerRoutes(
         : undefined;
 
     try {
-      const items = await scanner.getFolderPreviews(paths, limitPerFolder);
-      return { items };
+      const startedAt = Date.now();
+      const result = await scanner.getFolderPreviews(paths, limitPerFolder);
+      const durationMs = Date.now() - startedAt;
+
+      fastify.log.info(
+        {
+          requestPathCount: paths.length,
+          successCount: result.items.length,
+          failedCount: result.errors.length,
+          durationMs,
+          slowestPath: result.slowestPath ?? null,
+          slowestMs: result.slowestMs,
+        },
+        "folder preview batch completed"
+      );
+
+      void appendPreviewBatchLog(diagnosticsDir, {
+        ts: Date.now(),
+        requestPathCount: paths.length,
+        successCount: result.items.length,
+        failedCount: result.errors.length,
+        durationMs,
+        slowestPath: result.slowestPath,
+        slowestMs: result.slowestMs,
+        failures: result.errors,
+      });
+
+      return {
+        items: result.items,
+        errors: result.errors,
+      };
     } catch (error) {
       const message =
         error instanceof Error ? error.message : "Unable to build folder previews";
@@ -231,4 +262,27 @@ const parseMode = (
     return input;
   }
   throw new Error("mode must be light or full");
+};
+
+type PreviewBatchLogEntry = {
+  ts: number;
+  requestPathCount: number;
+  successCount: number;
+  failedCount: number;
+  durationMs: number;
+  slowestPath?: string;
+  slowestMs: number;
+  failures: Array<{ path: string; error: string }>;
+};
+
+const appendPreviewBatchLog = async (diagnosticsDir: string, entry: PreviewBatchLogEntry) => {
+  if (!diagnosticsDir) return;
+  const filePath = path.join(diagnosticsDir, "server-previews.log");
+  const line = `${JSON.stringify(entry)}\n`;
+  try {
+    await fs.mkdir(diagnosticsDir, { recursive: true });
+    await fs.appendFile(filePath, line, "utf8");
+  } catch {
+    // Diagnostics logging is best-effort and should not affect API behavior.
+  }
 };

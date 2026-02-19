@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "./App.css";
 import "./features/effects/effects.css";
-import { fetchFolder, fetchFolderPreviews } from "./api";
-import type { FolderPayload, MediaItem } from "./types";
+import { fetchFolder, fetchFolderPreviews, postPreviewDiagnostics } from "./api";
+import type { FolderPayload, MediaItem, PreviewDiagEvent } from "./types";
 import { MediaPreviewModal } from "./features/preview/MediaPreviewModal";
 import { formatBytes, formatDate } from "./utils";
 import { ParticleField } from "./features/effects/ParticleField";
@@ -24,6 +24,12 @@ const ROOT_PREVIEW_BATCH_SIZE = 20;
 const ROOT_PREVIEW_MAX_CONCURRENCY = 4;
 const ROOT_PREVIEW_RETRY_LIMIT = 2;
 const ROOT_PREVIEW_TIMEOUT_MS = 12_000;
+const PREVIEW_DIAG_RING_LIMIT = 200;
+const PREVIEW_DIAG_FLUSH_MS = 300;
+
+const APP_VERSION = import.meta.env.VITE_TMV_APP_VERSION ?? "0.1.0";
+const APP_SHORT_COMMIT = import.meta.env.VITE_TMV_SHORT_COMMIT ?? "dev";
+const APP_BUILD_TIME = import.meta.env.VITE_TMV_BUILD_TIME ?? "unknown";
 
 const makeHeartCursor = (hue: number) => {
   const color = `hsl(${hue},85%,70%)`;
@@ -34,6 +40,14 @@ const makeHeartCursor = (hue: number) => {
 
 const isAbortError = (error: unknown) =>
   error instanceof DOMException && error.name === "AbortError";
+
+const parseStatusCode = (error: unknown): number | undefined => {
+  if (!(error instanceof Error)) return undefined;
+  const match = /\((\d{3})\)/.exec(error.message);
+  if (!match) return undefined;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
 
 type CategoryCacheEntry = {
   payload: FolderPayload;
@@ -100,16 +114,56 @@ function App() {
   const rootPreviewPending = useRef<string[]>([]);
   const rootPreviewPendingSet = useRef(new Set<string>());
   const rootPreviewInFlight = useRef(new Set<string>());
+  const rootPreviewForceSingle = useRef(new Set<string>());
   const rootPreviewRetry = useRef(new Map<string, number>());
   const rootPreviewRunning = useRef(0);
   const rootPreviewControllers = useRef(new Set<AbortController>());
-  const versionLabel = "v0.6.0";
+  const previewDiagRing = useRef<PreviewDiagEvent[]>([]);
+  const previewDiagPending = useRef<PreviewDiagEvent[]>([]);
+  const previewDiagFlushTimer = useRef<number | null>(null);
+  const versionLabel = `v${APP_VERSION}`;
+  const versionFingerprint = `${versionLabel}+${APP_SHORT_COMMIT} (${APP_BUILD_TIME})`;
+
+  const flushPreviewDiagnostics = useCallback(async () => {
+    if (!previewDiagPending.current.length) return;
+    const payload = previewDiagPending.current.splice(0, previewDiagPending.current.length);
+    await postPreviewDiagnostics({ events: payload });
+  }, []);
+
+  const schedulePreviewDiagnosticsFlush = useCallback(() => {
+    if (previewDiagFlushTimer.current !== null) return;
+    previewDiagFlushTimer.current = window.setTimeout(() => {
+      previewDiagFlushTimer.current = null;
+      void flushPreviewDiagnostics();
+    }, PREVIEW_DIAG_FLUSH_MS);
+  }, [flushPreviewDiagnostics]);
+
+  const pushPreviewDiagEvent = useCallback(
+    (event: Omit<PreviewDiagEvent, "ts"> & { ts?: number }) => {
+      const payload: PreviewDiagEvent = {
+        ...event,
+        ts: event.ts ?? Date.now(),
+        paths: event.paths.map((path) => path.trim()).filter(Boolean),
+      };
+      previewDiagRing.current.push(payload);
+      if (previewDiagRing.current.length > PREVIEW_DIAG_RING_LIMIT) {
+        previewDiagRing.current.splice(
+          0,
+          previewDiagRing.current.length - PREVIEW_DIAG_RING_LIMIT
+        );
+      }
+      previewDiagPending.current.push(payload);
+      schedulePreviewDiagnosticsFlush();
+    },
+    [schedulePreviewDiagnosticsFlush]
+  );
 
   const resetRootPreviewQueue = useCallback(() => {
     rootPreviewSeq.current += 1;
     rootPreviewPending.current = [];
     rootPreviewPendingSet.current.clear();
     rootPreviewInFlight.current.clear();
+    rootPreviewForceSingle.current.clear();
     rootPreviewRetry.current.clear();
     rootPreviewRunning.current = 0;
     for (const controller of rootPreviewControllers.current) {
@@ -162,6 +216,42 @@ function App() {
     });
   }, []);
 
+  const requeueFailedPreviewPaths = useCallback(
+    (paths: string[], options?: { forceSingle?: boolean }) => {
+      if (!paths.length) return;
+      const exhausted: string[] = [];
+
+      for (const rawPath of paths) {
+        const failedPath = rawPath.trim();
+        if (!failedPath) continue;
+
+        if (options?.forceSingle) {
+          rootPreviewForceSingle.current.add(failedPath);
+        }
+
+        const retry = rootPreviewRetry.current.get(failedPath) ?? 0;
+        if (retry >= ROOT_PREVIEW_RETRY_LIMIT) {
+          exhausted.push(failedPath);
+          rootPreviewRetry.current.delete(failedPath);
+          rootPreviewForceSingle.current.delete(failedPath);
+          continue;
+        }
+
+        rootPreviewRetry.current.set(failedPath, retry + 1);
+        if (
+          !rootPreviewPendingSet.current.has(failedPath) &&
+          !rootPreviewInFlight.current.has(failedPath)
+        ) {
+          rootPreviewPending.current.push(failedPath);
+          rootPreviewPendingSet.current.add(failedPath);
+        }
+      }
+
+      markPreviewFailed(exhausted);
+    },
+    [markPreviewFailed]
+  );
+
   const pumpRootPreviewQueue = useCallback(() => {
     const seq = rootPreviewSeq.current;
     while (
@@ -169,20 +259,53 @@ function App() {
       rootPreviewPending.current.length
     ) {
       const batch: string[] = [];
-      while (
-        batch.length < ROOT_PREVIEW_BATCH_SIZE &&
-        rootPreviewPending.current.length
-      ) {
+      let forceSingleBatch = false;
+
+      while (rootPreviewPending.current.length && batch.length < ROOT_PREVIEW_BATCH_SIZE) {
         const next = rootPreviewPending.current.shift();
         if (!next) break;
         rootPreviewPendingSet.current.delete(next);
         if (rootPreviewInFlight.current.has(next)) continue;
+
+        const requiresSingle = rootPreviewForceSingle.current.has(next);
+        if (!batch.length) {
+          batch.push(next);
+          rootPreviewInFlight.current.add(next);
+          forceSingleBatch = requiresSingle;
+          if (requiresSingle) break;
+          continue;
+        }
+
+        if (forceSingleBatch || requiresSingle) {
+          if (!rootPreviewPendingSet.current.has(next)) {
+            rootPreviewPending.current.unshift(next);
+            rootPreviewPendingSet.current.add(next);
+          }
+          break;
+        }
+
         batch.push(next);
         rootPreviewInFlight.current.add(next);
       }
       if (!batch.length) break;
 
       rootPreviewRunning.current += 1;
+      const requestId = `rp-${seq}-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      pushPreviewDiagEvent({
+        phase: "enqueue",
+        batchSize: batch.length,
+        paths: batch,
+        requestId,
+      });
+      pushPreviewDiagEvent({
+        phase: "request",
+        batchSize: batch.length,
+        paths: batch,
+        requestId,
+      });
+
       const controller = new AbortController();
       rootPreviewControllers.current.add(controller);
       let timedOut = false;
@@ -202,35 +325,69 @@ function App() {
       )
         .then((result) => {
           if (seq !== rootPreviewSeq.current) return;
+          pushPreviewDiagEvent({
+            phase: "response",
+            batchSize: result.items.length,
+            paths: batch,
+            status: 200,
+            requestId,
+          });
+
           applyPreviewBatch(result.items);
+          if (result.items.length) {
+            pushPreviewDiagEvent({
+              phase: "apply",
+              batchSize: result.items.length,
+              paths: result.items.map((item) => item.path),
+              status: 200,
+              requestId,
+            });
+          }
+
+          const successPaths = new Set(result.items.map((item) => item.path));
+          for (const successPath of successPaths) {
+            rootPreviewRetry.current.delete(successPath);
+            rootPreviewForceSingle.current.delete(successPath);
+          }
+
+          const failedByServer = (result.errors ?? []).map((item) => item.path);
+          const failed = new Set(failedByServer);
+          for (const path of batch) {
+            if (!successPaths.has(path) && !failed.has(path)) {
+              failed.add(path);
+            }
+          }
+
+          if (failed.size) {
+            pushPreviewDiagEvent({
+              phase: "error",
+              batchSize: failed.size,
+              paths: [...failed],
+              status: 200,
+              err: `Preview batch partially failed (${failed.size}/${batch.length})`,
+              requestId,
+            });
+            requeueFailedPreviewPaths([...failed], {
+              forceSingle: batch.length > 1,
+            });
+          }
         })
         .catch((error) => {
           if ((isAbortError(error) && !timedOut) || seq !== rootPreviewSeq.current) return;
 
-          if (batch.length > 1) {
-            for (const failedPath of batch) {
-              if (rootPreviewPendingSet.current.has(failedPath)) continue;
-              rootPreviewPending.current.push(failedPath);
-              rootPreviewPendingSet.current.add(failedPath);
-            }
-            return;
-          }
-
-          const exhausted: string[] = [];
-          for (const failedPath of batch) {
-            const retry = rootPreviewRetry.current.get(failedPath) ?? 0;
-            if (retry >= ROOT_PREVIEW_RETRY_LIMIT) {
-              exhausted.push(failedPath);
-              continue;
-            }
-            rootPreviewRetry.current.set(failedPath, retry + 1);
-            if (!rootPreviewPendingSet.current.has(failedPath)) {
-              rootPreviewPending.current.push(failedPath);
-              rootPreviewPendingSet.current.add(failedPath);
-            }
-          }
-
-          markPreviewFailed(exhausted);
+          const err =
+            error instanceof Error ? error.message : timedOut ? "Preview request timeout" : "Unknown preview error";
+          pushPreviewDiagEvent({
+            phase: timedOut ? "timeout" : "error",
+            batchSize: batch.length,
+            paths: batch,
+            status: parseStatusCode(error),
+            err,
+            requestId,
+          });
+          requeueFailedPreviewPaths(batch, {
+            forceSingle: batch.length > 1,
+          });
         })
         .finally(() => {
           window.clearTimeout(timeoutId);
@@ -244,7 +401,7 @@ function App() {
           }
         });
     }
-  }, [applyPreviewBatch, markPreviewFailed]);
+  }, [applyPreviewBatch, pushPreviewDiagEvent, requeueFailedPreviewPaths]);
 
   const enqueueRootPreviewPaths = useCallback(
     (paths: string[]) => {
@@ -467,6 +624,16 @@ function App() {
   }, [loadRoot, resetRootPreviewQueue]);
 
   useEffect(() => {
+    return () => {
+      if (previewDiagFlushTimer.current !== null) {
+        window.clearTimeout(previewDiagFlushTimer.current);
+        previewDiagFlushTimer.current = null;
+      }
+      void flushPreviewDiagnostics();
+    };
+  }, [flushPreviewDiagnostics]);
+
+  useEffect(() => {
     if (folder?.subfolders.length && !categoryPath) {
       void handleSelectCategory(folder.subfolders[0].path);
     }
@@ -652,6 +819,10 @@ function App() {
           <div className="badge badge--split badge--react">
             <span className="badge__left">React</span>
             <span className="badge__right">19</span>
+          </div>
+          <div className="badge badge--split badge--build" title={versionFingerprint}>
+            <span className="badge__left">Build</span>
+            <span className="badge__right">{versionFingerprint}</span>
           </div>
         </div>
         <div className="microbar__right">

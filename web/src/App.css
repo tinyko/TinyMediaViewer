@@ -198,6 +198,20 @@ a,
   box-shadow: inset 1px 0 0 rgba(0, 0, 0, 0.05);
 }
 
+.badge--build .badge__left {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text);
+}
+
+.badge--build .badge__right {
+  background: rgba(60, 80, 120, 0.5);
+  color: var(--muted);
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .theme-toggle {
   width: 34px;
   height: 34px;

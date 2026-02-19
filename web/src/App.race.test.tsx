@@ -1,16 +1,18 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import { fetchFolder, fetchFolderPreviews } from "./api";
+import { fetchFolder, fetchFolderPreviews, postPreviewDiagnostics } from "./api";
 import type { FolderPayload } from "./types";
 
 vi.mock("./api", () => ({
   fetchFolder: vi.fn(),
   fetchFolderPreviews: vi.fn(),
+  postPreviewDiagnostics: vi.fn(),
 }));
 
 const mockedFetchFolder = vi.mocked(fetchFolder);
 const mockedFetchFolderPreviews = vi.mocked(fetchFolderPreviews);
+const mockedPostPreviewDiagnostics = vi.mocked(postPreviewDiagnostics);
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -73,6 +75,8 @@ describe("App request race handling", () => {
   beforeEach(() => {
     mockedFetchFolder.mockReset();
     mockedFetchFolderPreviews.mockReset();
+    mockedPostPreviewDiagnostics.mockReset();
+    mockedPostPreviewDiagnostics.mockResolvedValue();
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
   });
 

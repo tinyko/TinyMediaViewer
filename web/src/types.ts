@@ -42,6 +42,34 @@ export interface FolderPreviewBatchInput {
   limitPerFolder?: number;
 }
 
+export interface FolderPreviewBatchError {
+  path: string;
+  error: string;
+}
+
 export interface FolderPreviewBatchOutput {
   items: Array<FolderPreview & { countsReady: true; previewReady: true }>;
+  errors?: FolderPreviewBatchError[];
+}
+
+export type PreviewDiagEventPhase =
+  | "enqueue"
+  | "request"
+  | "response"
+  | "apply"
+  | "error"
+  | "timeout";
+
+export interface PreviewDiagEvent {
+  ts: number;
+  phase: PreviewDiagEventPhase;
+  batchSize: number;
+  paths: string[];
+  status?: number;
+  err?: string;
+  requestId?: string;
+}
+
+export interface PreviewDiagEventsInput {
+  events: PreviewDiagEvent[];
 }

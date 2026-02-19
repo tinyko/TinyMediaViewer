@@ -1,13 +1,15 @@
 mod commands;
 mod config;
+mod diagnostics;
 mod service_manager;
 mod viewer_gateway;
 
 use crate::{
     config::{AppStatePayload, RuntimeState, Settings},
+    diagnostics::DiagnosticsStore,
     service_manager::ServiceManager,
 };
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -25,6 +27,7 @@ const POPOVER_MARGIN_TOP: f64 = 8.0;
 
 pub struct AppRuntime {
     pub settings_path: PathBuf,
+    pub diagnostics: Arc<DiagnosticsStore>,
     pub inner: Mutex<RuntimeInner>,
 }
 
@@ -57,13 +60,20 @@ pub fn run() {
             let settings_path = config::settings_path()?;
             let settings = config::load_settings(&settings_path)?;
             let start_hidden = settings.start_hidden;
+            let diagnostics_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| format!("Failed to resolve app data dir: {error}"))?
+                .join("diagnostics");
+            let diagnostics = Arc::new(DiagnosticsStore::new(diagnostics_dir)?);
 
             app.manage(AppRuntime {
                 settings_path,
+                diagnostics: diagnostics.clone(),
                 inner: Mutex::new(RuntimeInner {
                     settings: settings.clone(),
                     runtime: RuntimeState::stopped(),
-                    service_manager: ServiceManager::new(),
+                    service_manager: ServiceManager::new(diagnostics),
                 }),
             });
 
@@ -89,6 +99,8 @@ pub fn run() {
             commands::pick_home_directory,
             commands::restart_services,
             commands::open_viewer,
+            commands::get_diagnostics_state,
+            commands::open_diagnostics_dir,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

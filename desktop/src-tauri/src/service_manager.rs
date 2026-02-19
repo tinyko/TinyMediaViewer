@@ -1,5 +1,6 @@
 use crate::{
     config::{RuntimeState, Settings},
+    diagnostics::DiagnosticsStore,
     viewer_gateway::{self, GatewayHandle},
 };
 use std::{
@@ -9,6 +10,7 @@ use std::{
     path::PathBuf,
     process::Command,
     process::Stdio,
+    sync::Arc,
     time::Duration,
     time::SystemTime,
     time::UNIX_EPOCH,
@@ -22,13 +24,15 @@ const HEALTH_CHECK_RETRIES: usize = 40;
 pub struct ServiceManager {
     server_child: Option<Child>,
     gateway: Option<GatewayHandle>,
+    diagnostics: Arc<DiagnosticsStore>,
 }
 
 impl ServiceManager {
-    pub fn new() -> Self {
+    pub fn new(diagnostics: Arc<DiagnosticsStore>) -> Self {
         Self {
             server_child: None,
             gateway: None,
+            diagnostics,
         }
     }
 
@@ -43,6 +47,7 @@ impl ServiceManager {
         let sidecar_path = resolve_sidecar_path(app)?;
         ensure_executable(&sidecar_path)?;
         let media_access_token = build_media_access_token(api_port);
+        let diagnostics_dir = self.diagnostics.diagnostics_dir();
 
         let child = tokio::process::Command::new(&sidecar_path)
             .env("MEDIA_ROOT", &settings.home_dir)
@@ -50,6 +55,7 @@ impl ServiceManager {
             .env("SERVER_HOST", "127.0.0.1")
             .env("MEDIA_ACCESS_TOKEN", &media_access_token)
             .env("REQUIRE_LAN_TOKEN", "true")
+            .env("TMV_DIAGNOSTICS_DIR", diagnostics_dir)
             .kill_on_drop(true)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -67,9 +73,14 @@ impl ServiceManager {
 
         let viewer_port = find_available_port(settings.preferred_viewer_port)?;
         let viewer_dir = resolve_viewer_assets_path(app)?;
-        let gateway =
-            viewer_gateway::start_gateway(viewer_dir, viewer_port, api_port, media_access_token)
-                .await?;
+        let gateway = viewer_gateway::start_gateway(
+            viewer_dir,
+            viewer_port,
+            api_port,
+            media_access_token,
+            self.diagnostics.clone(),
+        )
+        .await?;
         self.gateway = Some(gateway);
         let lan_ip = detect_lan_ipv4();
 

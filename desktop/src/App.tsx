@@ -26,6 +26,23 @@ type AppState = {
   runtime: Runtime;
 };
 
+type PreviewDiagEvent = {
+  ts: number;
+  phase: "enqueue" | "request" | "response" | "apply" | "error" | "timeout";
+  batchSize: number;
+  paths: string[];
+  status?: number;
+  err?: string;
+  requestId?: string;
+};
+
+type DiagnosticsState = {
+  events: PreviewDiagEvent[];
+  lastError?: string;
+  lastSuccessfulApplyTs?: number;
+  rootCause?: string;
+};
+
 const statusTextMap: Record<RuntimeStatus, string> = {
   starting: "启动中",
   running: "运行中",
@@ -35,6 +52,7 @@ const statusTextMap: Record<RuntimeStatus, string> = {
 
 function App() {
   const [state, setState] = useState<AppState | null>(null);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsState | null>(null);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
@@ -47,9 +65,13 @@ function App() {
   });
 
   const refreshState = useCallback(async () => {
-    const next = await invoke<AppState>("get_app_state");
+    const [next, nextDiagnostics] = await Promise.all([
+      invoke<AppState>("get_app_state"),
+      invoke<DiagnosticsState>("get_diagnostics_state").catch(() => null),
+    ]);
     setState(next);
     setForm(next.settings);
+    setDiagnostics(nextDiagnostics);
   }, []);
 
   useEffect(() => {
@@ -70,6 +92,11 @@ function App() {
     const unlistenPromise = listen<AppState>("app-state-updated", (event) => {
       setState(event.payload);
       setForm(event.payload.settings);
+      invoke<DiagnosticsState>("get_diagnostics_state")
+        .then((payload) => setDiagnostics(payload))
+        .catch(() => {
+          // no-op
+        });
     });
 
     const poll = window.setInterval(() => {
@@ -141,6 +168,16 @@ function App() {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setError(`打开 Viewer 失败: ${detail}`);
+    }
+  }, []);
+
+  const openDiagnosticsDir = useCallback(async () => {
+    try {
+      setError(null);
+      await invoke("open_diagnostics_dir");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setError(`打开诊断目录失败: ${detail}`);
     }
   }, []);
 
@@ -241,7 +278,27 @@ function App() {
           本机 URL:{" "}
           {state?.runtime.viewerLocalUrl ? <code>{state.runtime.viewerLocalUrl}</code> : "-"}
         </p>
+        <p>
+          诊断事件: <code>{diagnostics?.events.length ?? 0}</code>
+        </p>
+        <p>
+          根因归类: <code>{diagnostics?.rootCause ?? "-"}</code>
+        </p>
+        <p>
+          最后成功回填:{" "}
+          {diagnostics?.lastSuccessfulApplyTs ? (
+            <code>{new Date(diagnostics.lastSuccessfulApplyTs).toLocaleString()}</code>
+          ) : (
+            "-"
+          )}
+        </p>
+        {diagnostics?.lastError && <p className="error">诊断错误: {diagnostics.lastError}</p>}
         {state?.runtime.lastError && <p className="error">服务错误: {state.runtime.lastError}</p>}
+        <div className="actions" style={{ marginTop: 8 }}>
+          <button type="button" className="secondary" onClick={openDiagnosticsDir}>
+            打开诊断目录
+          </button>
+        </div>
       </section>
 
       {message && <p className="message">{message}</p>}

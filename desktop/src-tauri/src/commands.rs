@@ -1,6 +1,7 @@
 use crate::{
     apply_autostart,
     config::{self, AppStatePayload, RuntimeState, Settings},
+    diagnostics::DiagnosticsState,
     AppRuntime,
 };
 use serde::Deserialize;
@@ -109,6 +110,18 @@ pub async fn open_viewer(app: AppHandle, state: State<'_, AppRuntime>) -> Result
 
     let _ = app.emit("viewer-opened", viewer_url);
     Ok(())
+}
+
+#[tauri::command]
+pub async fn get_diagnostics_state(
+    state: State<'_, AppRuntime>,
+) -> Result<DiagnosticsState, String> {
+    Ok(state.diagnostics.state())
+}
+
+#[tauri::command]
+pub async fn open_diagnostics_dir(state: State<'_, AppRuntime>) -> Result<(), String> {
+    state.diagnostics.open_in_finder()
 }
 
 fn validate_settings(input: &SettingsInput) -> Result<(), String> {
