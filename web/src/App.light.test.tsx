@@ -1,7 +1,12 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import { fetchFolder, fetchFolderPreviews, postPreviewDiagnostics } from "./api";
+import {
+  fetchFolder,
+  fetchFolderPreviews,
+  postPerfDiagnostics,
+  postPreviewDiagnostics,
+} from "./api";
 import type {
   FolderPayload,
   FolderPreviewBatchOutput,
@@ -12,11 +17,13 @@ vi.mock("./api", () => ({
   fetchFolder: vi.fn(),
   fetchFolderPreviews: vi.fn(),
   postPreviewDiagnostics: vi.fn(),
+  postPerfDiagnostics: vi.fn(),
 }));
 
 const mockedFetchFolder = vi.mocked(fetchFolder);
 const mockedFetchFolderPreviews = vi.mocked(fetchFolderPreviews);
 const mockedPostPreviewDiagnostics = vi.mocked(postPreviewDiagnostics);
+const mockedPostPerfDiagnostics = vi.mocked(postPerfDiagnostics);
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -82,7 +89,9 @@ describe("App root light mode + preview backfill", () => {
     mockedFetchFolder.mockReset();
     mockedFetchFolderPreviews.mockReset();
     mockedPostPreviewDiagnostics.mockReset();
+    mockedPostPerfDiagnostics.mockReset();
     mockedPostPreviewDiagnostics.mockResolvedValue();
+    mockedPostPerfDiagnostics.mockResolvedValue();
   });
 
   it("loads root with mode=light and backfills counts via preview batch API", async () => {

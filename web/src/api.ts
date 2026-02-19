@@ -1,5 +1,6 @@
 import type {
   FolderPayload,
+  PerfDiagEventsInput,
   FolderPreviewBatchInput,
   FolderPreviewBatchOutput,
   PreviewDiagEventsInput,
@@ -75,6 +76,20 @@ export async function postPreviewDiagnostics(
 ): Promise<void> {
   if (!input.events.length) return;
   await fetch("/__tmv/diag/preview", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+    keepalive: true,
+  }).catch(() => {
+    // Diagnostics transport failures should not affect viewer behavior.
+  });
+}
+
+export async function postPerfDiagnostics(input: PerfDiagEventsInput): Promise<void> {
+  if (!input.events.length) return;
+  await fetch("/__tmv/diag/perf", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

@@ -73,3 +73,20 @@ export interface PreviewDiagEvent {
 export interface PreviewDiagEventsInput {
   events: PreviewDiagEvent[];
 }
+
+export type EffectsMode = "auto" | "off" | "full";
+export type EffectsRenderer = "canvas2d" | "webgpu";
+
+export interface PerfDiagEvent {
+  ts: number;
+  fpsEstimate: number;
+  longTaskCount10s: number;
+  visibleCards: number;
+  effectsMode: EffectsMode;
+  renderer: EffectsRenderer;
+  note?: string;
+}
+
+export interface PerfDiagEventsInput {
+  events: PerfDiagEvent[];
+}

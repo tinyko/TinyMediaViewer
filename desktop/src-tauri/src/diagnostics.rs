@@ -11,6 +11,7 @@ use std::{
 
 const MAX_EVENTS: usize = 200;
 const EVENTS_FILENAME: &str = "preview-events.jsonl";
+const PERF_EVENTS_FILENAME: &str = "perf-events.jsonl";
 const GATEWAY_LOG_FILENAME: &str = "gateway.log";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -57,6 +58,25 @@ pub struct PreviewDiagEventsInput {
     pub events: Vec<PreviewDiagEvent>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerfDiagEvent {
+    pub ts: u64,
+    pub fps_estimate: f64,
+    pub long_task_count10s: u32,
+    pub visible_cards: u32,
+    pub effects_mode: String,
+    pub renderer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PerfDiagEventsInput {
+    pub events: Vec<PerfDiagEvent>,
+}
+
 #[derive(Debug)]
 struct DiagnosticsInner {
     events: VecDeque<PreviewDiagEvent>,
@@ -67,6 +87,7 @@ struct DiagnosticsInner {
 pub struct DiagnosticsStore {
     dir: PathBuf,
     events_path: PathBuf,
+    perf_events_path: PathBuf,
     gateway_log_path: PathBuf,
     inner: Mutex<DiagnosticsInner>,
 }
@@ -81,12 +102,14 @@ impl DiagnosticsStore {
         })?;
 
         let events_path = dir.join(EVENTS_FILENAME);
+        let perf_events_path = dir.join(PERF_EVENTS_FILENAME);
         let gateway_log_path = dir.join(GATEWAY_LOG_FILENAME);
         let (events, last_error, last_successful_apply_ts) = load_recent_events(&events_path);
 
         Ok(Self {
             dir,
             events_path,
+            perf_events_path,
             gateway_log_path,
             inner: Mutex::new(DiagnosticsInner {
                 events,
@@ -153,6 +176,29 @@ impl DiagnosticsStore {
         }
 
         append_jsonl(&self.events_path, &events)
+    }
+
+    pub fn record_perf_events(&self, mut events: Vec<PerfDiagEvent>) -> Result<(), String> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
+        for event in &mut events {
+            if event.ts == 0 {
+                event.ts = now_ms();
+            }
+
+            event.effects_mode = event.effects_mode.trim().to_string();
+            event.renderer = event.renderer.trim().to_string();
+            if let Some(note) = event.note.as_mut() {
+                *note = note.trim().to_string();
+                if note.is_empty() {
+                    event.note = None;
+                }
+            }
+        }
+
+        append_perf_jsonl(&self.perf_events_path, &events)
     }
 
     pub fn log_gateway_request(
@@ -243,6 +289,34 @@ fn append_jsonl(path: &PathBuf, events: &[PreviewDiagEvent]) -> Result<(), Strin
     for event in events {
         let line = serde_json::to_string(event)
             .map_err(|error| format!("Failed serializing diagnostics event: {error}"))?;
+        file.write_all(line.as_bytes())
+            .and_then(|_| file.write_all(b"\n"))
+            .map_err(|error| {
+                format!(
+                    "Failed writing diagnostics file {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+
+    Ok(())
+}
+
+fn append_perf_jsonl(path: &PathBuf, events: &[PerfDiagEvent]) -> Result<(), String> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| {
+            format!(
+                "Failed to open diagnostics file {}: {error}",
+                path.display()
+            )
+        })?;
+
+    for event in events {
+        let line = serde_json::to_string(event)
+            .map_err(|error| format!("Failed serializing perf diagnostics event: {error}"))?;
         file.write_all(line.as_bytes())
             .and_then(|_| file.write_all(b"\n"))
             .map_err(|error| {

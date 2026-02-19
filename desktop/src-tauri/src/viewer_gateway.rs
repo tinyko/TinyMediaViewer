@@ -1,4 +1,4 @@
-use crate::diagnostics::{DiagnosticsStore, PreviewDiagEventsInput};
+use crate::diagnostics::{DiagnosticsStore, PerfDiagEventsInput, PreviewDiagEventsInput};
 use axum::{
     body::{to_bytes, Body},
     extract::{Request, State},
@@ -82,6 +82,7 @@ pub async fn start_gateway(
 
     let router = Router::new()
         .route("/__tmv/diag/preview", post(record_preview_events))
+        .route("/__tmv/diag/perf", post(record_perf_events))
         .route("/api", any(proxy_to_api))
         .route("/api/{*path}", any(proxy_to_api))
         .route("/media", any(proxy_to_api))
@@ -156,6 +157,57 @@ async fn record_preview_events(
                 format!("Failed to record diagnostics events: {error}"),
                 &trace_id,
                 "diag-preview",
+                Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
+            )
+        }
+    }
+}
+
+async fn record_perf_events(
+    State(state): State<GatewayState>,
+    Json(payload): Json<PerfDiagEventsInput>,
+) -> Response {
+    let trace_id = next_trace_id();
+    let started = Instant::now();
+    let events_len = payload.events.len();
+
+    let result = state.diagnostics.record_perf_events(payload.events);
+    match result {
+        Ok(()) => {
+            let _ = state.diagnostics.log_gateway_request(
+                &trace_id,
+                "POST",
+                "diag-perf",
+                "/__tmv/diag/perf",
+                StatusCode::OK.as_u16(),
+                Some(StatusCode::OK.as_u16()),
+                started.elapsed().as_millis(),
+                None,
+            );
+            build_trace_response(
+                StatusCode::OK,
+                format!("recorded {events_len} perf events"),
+                &trace_id,
+                "diag-perf",
+                Some(StatusCode::OK.as_u16()),
+            )
+        }
+        Err(error) => {
+            let _ = state.diagnostics.log_gateway_request(
+                &trace_id,
+                "POST",
+                "diag-perf",
+                "/__tmv/diag/perf",
+                StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
+                started.elapsed().as_millis(),
+                Some(&error),
+            );
+            build_trace_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to record perf diagnostics events: {error}"),
+                &trace_id,
+                "diag-perf",
                 Some(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
             )
         }
