@@ -197,6 +197,18 @@ test("POST /api/folder/previews validates payload and returns preview batch", as
         },
       });
       assert.equal(invalid.statusCode, 400);
+
+      const partial = await app.inject({
+        method: "POST",
+        url: "/api/folder/previews",
+        payload: {
+          paths: ["a", "__missing__"],
+        },
+      });
+      assert.equal(partial.statusCode, 200);
+      const partialBody = partial.json();
+      assert.equal(partialBody.items.length, 1);
+      assert.equal(partialBody.items[0].path, "a");
     } finally {
       await app.close();
     }

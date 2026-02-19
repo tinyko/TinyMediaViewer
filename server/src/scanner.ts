@@ -210,11 +210,19 @@ export class MediaScanner {
       Math.max(this.previewLimit * 4, this.previewLimit)
     );
 
-    return mapWithConcurrency(
+    const previews = await mapWithConcurrency(
       uniquePaths,
       clamp(Math.floor(this.statConcurrency / 2), 2, 8),
-      async (relativePath) => this.getFolderPreview(relativePath, normalizedLimit)
+      async (relativePath) => {
+        try {
+          return await this.getFolderPreview(relativePath, normalizedLimit);
+        } catch {
+          return null;
+        }
+      }
     );
+
+    return previews.filter((item): item is FolderPreview => Boolean(item));
   }
 
   resolveMediaFile(relativePath: string) {

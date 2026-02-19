@@ -184,10 +184,7 @@ function App() {
             const retry = rootPreviewRetry.current.get(failedPath) ?? 0;
             if (retry >= ROOT_PREVIEW_RETRY_LIMIT) continue;
             rootPreviewRetry.current.set(failedPath, retry + 1);
-            if (
-              !rootPreviewPendingSet.current.has(failedPath) &&
-              !rootPreviewInFlight.current.has(failedPath)
-            ) {
+            if (!rootPreviewPendingSet.current.has(failedPath)) {
               rootPreviewPending.current.push(failedPath);
               rootPreviewPendingSet.current.add(failedPath);
             }
