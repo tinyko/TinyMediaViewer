@@ -178,4 +178,53 @@ describe("App root light mode + preview backfill", () => {
       expect(screen.queryByRole("button", { name: /alpha/i })).not.toBeInTheDocument();
     });
   });
+
+  it("updates meter pill by currently rendered media count", async () => {
+    const manyMedia = Array.from({ length: 60 }, (_, index) =>
+      makeMedia(`IMG_${index.toString().padStart(4, "0")}.jpg`, "image")
+    );
+
+    mockedFetchFolder.mockImplementation((targetPath = "") => {
+      if (targetPath === "") {
+        return Promise.resolve({
+          ...makeLightRootPayload(),
+          subfolders: [makeLightRootPayload().subfolders[0]],
+          totals: { media: 0, subfolders: 1 },
+        });
+      }
+      return Promise.resolve({
+        folder: { name: targetPath, path: targetPath },
+        breadcrumb: [
+          { name: "root", path: "" },
+          { name: targetPath, path: targetPath },
+        ],
+        subfolders: [],
+        media: manyMedia,
+        totals: { media: manyMedia.length, subfolders: 0 },
+      });
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({
+      items: [
+        {
+          name: "alpha",
+          path: "alpha",
+          modified: 100,
+          counts: { images: manyMedia.length, gifs: 0, videos: 0, subfolders: 0 },
+          previews: manyMedia.slice(0, 2),
+          countsReady: true,
+          previewReady: true,
+        },
+      ],
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("48 / 60 媒体")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "加载更多" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("60 / 60 媒体")).toBeInTheDocument();
+    });
+  });
 });

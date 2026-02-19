@@ -453,9 +453,12 @@ function App() {
     return sortMediaByTime(filtered, mediaSort);
   }, [categoryPreview, mediaFilter, mediaSort]);
 
-  const visibleCategoryMedia = filteredCategoryMedia.slice(0, categoryVisibleCount);
+  const visibleCategoryMedia = useMemo(
+    () => filteredCategoryMedia.slice(0, categoryVisibleCount),
+    [filteredCategoryMedia, categoryVisibleCount]
+  );
   const totalMedia = categoryPreview?.totals.media ?? 0;
-  const visibleCount = filteredCategoryMedia.length;
+  const visibleCount = visibleCategoryMedia.length;
   const meterPercent = totalMedia ? Math.min(100, (visibleCount / totalMedia) * 100) : 0;
   const selectedIndex = selected
     ? filteredCategoryMedia.findIndex((item) => item.path === selected.path)
