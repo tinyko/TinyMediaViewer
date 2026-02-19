@@ -248,34 +248,14 @@ fn copy_sidecar_to_runtime_bin(app: &AppHandle, source: &PathBuf) -> Result<Path
         .map_err(|error| format!("Failed to create runtime bin dir: {error}"))?;
 
     let destination = runtime_bin_dir.join(SIDECAR_NAME);
-    let should_copy = match (fs::metadata(source), fs::metadata(&destination)) {
-        (Ok(source_meta), Ok(dest_meta)) => {
-            source_meta.len() != dest_meta.len()
-                || source_meta
-                    .modified()
-                    .ok()
-                    .zip(dest_meta.modified().ok())
-                    .map(|(source_mtime, dest_mtime)| source_mtime > dest_mtime)
-                    .unwrap_or(true)
-        }
-        (Ok(_), Err(_)) => true,
-        (Err(error), _) => {
-            return Err(format!(
-                "Failed to read bundled sidecar metadata ({}): {error}",
-                source.display()
-            ));
-        }
-    };
-
-    if should_copy {
-        fs::copy(source, &destination).map_err(|error| {
-            format!(
-                "Failed to copy sidecar from {} to {}: {error}",
-                source.display(),
-                destination.display()
-            )
-        })?;
-    }
+    // Always overwrite the runtime sidecar so DMG upgrades never keep stale binaries.
+    fs::copy(source, &destination).map_err(|error| {
+        format!(
+            "Failed to copy sidecar from {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })?;
 
     let mut permissions = fs::metadata(&destination)
         .map_err(|error| format!("Failed to read runtime sidecar metadata: {error}"))?
