@@ -179,7 +179,7 @@ describe("App root light mode + preview backfill", () => {
     });
   });
 
-  it("updates meter pill by currently rendered media count", async () => {
+  it("updates meter pill by filtered total count", async () => {
     const manyMedia = Array.from({ length: 60 }, (_, index) =>
       makeMedia(`IMG_${index.toString().padStart(4, "0")}.jpg`, "image")
     );
@@ -219,12 +219,46 @@ describe("App root light mode + preview backfill", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("48 / 60 媒体")).toBeInTheDocument();
+    expect(await screen.findByText("60 / 60 媒体")).toBeInTheDocument();
+  });
 
-    await userEvent.click(screen.getByRole("button", { name: "加载更多" }));
+  it("uses selected folder typed counts as meter total", async () => {
+    mockedFetchFolder.mockImplementation((targetPath = "") => {
+      if (targetPath === "") {
+        return Promise.resolve({
+          ...makeLightRootPayload(),
+          subfolders: [
+            {
+              ...makeLightRootPayload().subfolders[0],
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 4112, gifs: 0, videos: 2, subfolders: 0 },
+            },
+          ],
+          totals: { media: 0, subfolders: 1 },
+        });
+      }
+      return Promise.resolve({
+        folder: { name: targetPath, path: targetPath },
+        breadcrumb: [
+          { name: "root", path: "" },
+          { name: targetPath, path: targetPath },
+        ],
+        subfolders: [],
+        media: [makeMedia("A.jpg", "image"), makeMedia("B.mp4", "video")],
+        totals: { media: 4114, subfolders: 0 },
+      });
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    render(<App />);
+
+    expect(await screen.findByText("4112 / 4114 媒体")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "视频" }));
 
     await waitFor(() => {
-      expect(screen.getByText("60 / 60 媒体")).toBeInTheDocument();
+      expect(screen.getByText("2 / 4114 媒体")).toBeInTheDocument();
     });
   });
 });

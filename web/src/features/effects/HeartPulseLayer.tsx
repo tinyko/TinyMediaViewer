@@ -35,6 +35,11 @@ export function HeartPulseLayer({
       [];
     let raf = 0;
 
+    const ensureTicking = () => {
+      if (raf !== 0) return;
+      raf = requestAnimationFrame(tick);
+    };
+
     const resize = () => {
       canvas.width = window.innerWidth;
       canvas.height = window.innerHeight;
@@ -46,11 +51,12 @@ export function HeartPulseLayer({
       timeoutsRef.current.push(id);
     };
 
-    const addHeart = (x: number, y: number, scale: number, hue: number, particleCount = 60) => {
+    const addHeart = (x: number, y: number, scale: number, hue: number, particleCount = 24) => {
       const heartY = y + pulseOffsetY;
       onHueChange(hue);
       hearts.push({ x, y: heartY, progress: 0, hue, scale });
-      if (hearts.length > 120) hearts = hearts.slice(-120);
+      if (hearts.length > 80) hearts = hearts.slice(-80);
+      ensureTicking();
 
       const particleCanvas = document.querySelector(".particle-layer") as HTMLCanvasElement | null;
       if (particleCanvas) {
@@ -76,8 +82,8 @@ export function HeartPulseLayer({
 
     const doubleBeat = (x: number, y: number) => {
       const hue = Math.random() * 360;
-      addHeart(x, y, 1.25, hue, 70);
-      schedule(() => addHeart(x, y, 1.08, hue, 36), 140);
+      addHeart(x, y, 1.2, hue, 28);
+      schedule(() => addHeart(x, y, 1.06, hue, 16), 140);
     };
 
     const stopHoverPulse = () => {
@@ -97,7 +103,7 @@ export function HeartPulseLayer({
       hoverTimerRef.current = window.setInterval(() => {
         const point = hoverPointRef.current ?? { x, y };
         doubleBeat(point.x, point.y);
-      }, 1400);
+      }, 1800);
     };
 
     const onPointer = (event: PointerEvent) => {
@@ -128,11 +134,16 @@ export function HeartPulseLayer({
     };
 
     const tick = () => {
+      raf = 0;
       const { width, height } = canvas;
+      if (!hearts.length || document.hidden) {
+        ctx.clearRect(0, 0, width, height);
+        return;
+      }
       ctx.clearRect(0, 0, width, height);
       const next: typeof hearts = [];
       for (const heart of hearts) {
-        const progress = heart.progress + 0.02;
+        const progress = heart.progress + 0.03;
         if (progress >= 1) continue;
         const scale = (16 + 36 * progress) * heart.scale;
         ctx.beginPath();
@@ -143,19 +154,28 @@ export function HeartPulseLayer({
         next.push({ ...heart, progress });
       }
       hearts = next;
-      raf = requestAnimationFrame(tick);
+      if (hearts.length) {
+        raf = requestAnimationFrame(tick);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden && hearts.length) {
+        ensureTicking();
+      }
     };
 
     window.addEventListener("resize", resize);
     window.addEventListener("pointermove", onPointer, { passive: true });
     window.addEventListener("pointerenter", onPointer, { passive: true });
-    raf = requestAnimationFrame(tick);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf) cancelAnimationFrame(raf);
       window.removeEventListener("resize", resize);
       window.removeEventListener("pointermove", onPointer);
       window.removeEventListener("pointerenter", onPointer);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       stopHoverPulse();
     };
   }, [

@@ -67,9 +67,8 @@ function App() {
     const stored = window.localStorage.getItem("mv-low-performance");
     if (stored === "true") return true;
     if (stored === "false") return false;
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const lowCpu = (window.navigator.hardwareConcurrency ?? 8) <= 4;
-    return reducedMotion || lowCpu;
+    // Default to low-performance mode for thermal safety unless user explicitly overrides.
+    return true;
   };
 
   const [folder, setFolder] = useState<FolderPayload | null>(null);
@@ -453,13 +452,27 @@ function App() {
     return sortMediaByTime(filtered, mediaSort);
   }, [categoryPreview, mediaFilter, mediaSort]);
 
+  const selectedCategorySummary = useMemo(() => {
+    if (!folder || !categoryPath) return null;
+    return folder.subfolders.find((item) => item.path === categoryPath) ?? null;
+  }, [folder, categoryPath]);
+
   const visibleCategoryMedia = useMemo(
     () => filteredCategoryMedia.slice(0, categoryVisibleCount),
     [filteredCategoryMedia, categoryVisibleCount]
   );
-  const totalMedia = categoryPreview?.totals.media ?? 0;
-  const visibleCount = visibleCategoryMedia.length;
-  const meterPercent = totalMedia ? Math.min(100, (visibleCount / totalMedia) * 100) : 0;
+  const selectedCounts = selectedCategorySummary?.countsReady
+    ? selectedCategorySummary.counts
+    : null;
+  const totalMedia = selectedCounts
+    ? selectedCounts.images + selectedCounts.gifs + selectedCounts.videos
+    : categoryPreview?.totals.media ?? 0;
+  const filteredCount = selectedCounts
+    ? mediaFilter === "image"
+      ? selectedCounts.images + selectedCounts.gifs
+      : selectedCounts.videos
+    : filteredCategoryMedia.length;
+  const meterPercent = totalMedia ? Math.min(100, (filteredCount / totalMedia) * 100) : 0;
   const selectedIndex = selected
     ? filteredCategoryMedia.findIndex((item) => item.path === selected.path)
     : -1;
@@ -884,7 +897,7 @@ function App() {
               <div className="meter-pill" aria-label="媒体计数">
                 <div className="meter-pill__fill" style={{ width: `${meterPercent}%` }} />
                 <span className="meter-pill__text">
-                  {visibleCount} / {totalMedia} 媒体
+                  {filteredCount} / {totalMedia} 媒体
                 </span>
               </div>
               <div className="toggle-switch tiny">

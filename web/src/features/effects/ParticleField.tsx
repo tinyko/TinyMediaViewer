@@ -33,6 +33,12 @@ export function ParticleField({ enabled, cursorOffset }: ParticleFieldProps) {
       angle: number;
     }> = [];
     let raf = 0;
+    let lastPointerEmitAt = 0;
+
+    const ensureTicking = () => {
+      if (raf !== 0) return;
+      raf = requestAnimationFrame(tick);
+    };
 
     const resize = () => {
       canvas.width = window.innerWidth;
@@ -40,10 +46,11 @@ export function ParticleField({ enabled, cursorOffset }: ParticleFieldProps) {
     };
     resize();
 
-    const pushParticles = (x: number, y: number, count = 10, hueOverride?: number) => {
+    const pushParticles = (x: number, y: number, count = 4, hueOverride?: number) => {
+      if (document.hidden) return;
       for (let i = 0; i < count; i++) {
         const angle = Math.random() * Math.PI * 2;
-        const speed = Math.random() * 2 + 0.5;
+        const speed = Math.random() * 1.6 + 0.4;
         const shape: Shape =
           Math.random() < 0.5
             ? "circle"
@@ -62,27 +69,39 @@ export function ParticleField({ enabled, cursorOffset }: ParticleFieldProps) {
           angle: Math.random() * Math.PI * 2,
         });
       }
-      if (particles.length > 800) {
-        particles = particles.slice(-800);
+      if (particles.length > 320) {
+        particles = particles.slice(-320);
       }
+      ensureTicking();
     };
 
     const handlePointer = (event: PointerEvent) => {
-      pushParticles(event.clientX + cursorOffset.x, event.clientY + cursorOffset.y, 8);
+      const now = performance.now();
+      if (now - lastPointerEmitAt < 32) return;
+      lastPointerEmitAt = now;
+      pushParticles(event.clientX + cursorOffset.x, event.clientY + cursorOffset.y, 4);
     };
 
     const handleTouch = (event: TouchEvent) => {
       const touch = event.touches[0];
       if (!touch) return;
-      pushParticles(touch.clientX + cursorOffset.x, touch.clientY + cursorOffset.y, 8);
+      const now = performance.now();
+      if (now - lastPointerEmitAt < 48) return;
+      lastPointerEmitAt = now;
+      pushParticles(touch.clientX + cursorOffset.x, touch.clientY + cursorOffset.y, 4);
     };
 
     const tick = () => {
+      raf = 0;
       const { width, height } = canvas;
+      if (!particles.length || document.hidden) {
+        ctx.clearRect(0, 0, width, height);
+        return;
+      }
       ctx.clearRect(0, 0, width, height);
       const next: typeof particles = [];
       for (const particle of particles) {
-        const life = particle.life - 0.01;
+        const life = particle.life - 0.016;
         if (life <= 0) continue;
         const x = particle.x + particle.vx;
         const y = particle.y + particle.vy;
@@ -112,8 +131,11 @@ export function ParticleField({ enabled, cursorOffset }: ParticleFieldProps) {
         ctx.fill();
         next.push({ ...particle, x, y, life });
       }
+      ctx.globalAlpha = 1;
       particles = next;
-      raf = requestAnimationFrame(tick);
+      if (particles.length) {
+        raf = requestAnimationFrame(tick);
+      }
     };
 
     const handleBurst = (event: Event) => {
@@ -121,21 +143,28 @@ export function ParticleField({ enabled, cursorOffset }: ParticleFieldProps) {
         event as CustomEvent<{ x: number; y: number; count?: number; hue?: number }>
       ).detail;
       if (detail) {
-        pushParticles(detail.x, detail.y, detail.count ?? 8, detail.hue);
+        pushParticles(detail.x, detail.y, detail.count ?? 6, detail.hue);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden && particles.length) {
+        ensureTicking();
       }
     };
 
     window.addEventListener("resize", resize);
     window.addEventListener("pointermove", handlePointer, { passive: true });
     window.addEventListener("touchmove", handleTouch, { passive: true });
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     canvas.addEventListener("particle-burst", handleBurst as EventListener);
-    raf = requestAnimationFrame(tick);
 
     return () => {
-      cancelAnimationFrame(raf);
+      if (raf) cancelAnimationFrame(raf);
       window.removeEventListener("resize", resize);
       window.removeEventListener("pointermove", handlePointer);
       window.removeEventListener("touchmove", handleTouch);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       canvas.removeEventListener("particle-burst", handleBurst as EventListener);
     };
   }, [cursorOffset.x, cursorOffset.y, enabled]);
