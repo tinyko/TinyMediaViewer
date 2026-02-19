@@ -22,7 +22,8 @@ const INITIAL_VISIBLE_ITEMS = 48;
 const PAGE_STEP = 32;
 const ROOT_PREVIEW_BATCH_SIZE = 20;
 const ROOT_PREVIEW_MAX_CONCURRENCY = 4;
-const ROOT_PREVIEW_RETRY_LIMIT = 1;
+const ROOT_PREVIEW_RETRY_LIMIT = 2;
+const ROOT_PREVIEW_TIMEOUT_MS = 12_000;
 
 const makeHeartCursor = (hue: number) => {
   const color = `hsl(${hue},85%,70%)`;
@@ -141,6 +142,26 @@ function App() {
     });
   }, []);
 
+  const markPreviewFailed = useCallback((paths: string[]) => {
+    if (!paths.length) return;
+    const failed = new Set(paths);
+    setFolder((previous) => {
+      if (!previous) return previous;
+      let changed = false;
+      const subfolders = previous.subfolders.map((item) => {
+        if (!failed.has(item.path) || item.countsReady) return item;
+        changed = true;
+        return {
+          ...item,
+          countsReady: true,
+          previewReady: false,
+          approximate: true,
+        };
+      });
+      return changed ? { ...previous, subfolders } : previous;
+    });
+  }, []);
+
   const pumpRootPreviewQueue = useCallback(() => {
     const seq = rootPreviewSeq.current;
     while (
@@ -164,6 +185,11 @@ function App() {
       rootPreviewRunning.current += 1;
       const controller = new AbortController();
       rootPreviewControllers.current.add(controller);
+      let timedOut = false;
+      const timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, ROOT_PREVIEW_TIMEOUT_MS);
 
       void fetchFolderPreviews(
         {
@@ -179,18 +205,35 @@ function App() {
           applyPreviewBatch(result.items);
         })
         .catch((error) => {
-          if (isAbortError(error) || seq !== rootPreviewSeq.current) return;
+          if ((isAbortError(error) && !timedOut) || seq !== rootPreviewSeq.current) return;
+
+          if (batch.length > 1) {
+            for (const failedPath of batch) {
+              if (rootPreviewPendingSet.current.has(failedPath)) continue;
+              rootPreviewPending.current.push(failedPath);
+              rootPreviewPendingSet.current.add(failedPath);
+            }
+            return;
+          }
+
+          const exhausted: string[] = [];
           for (const failedPath of batch) {
             const retry = rootPreviewRetry.current.get(failedPath) ?? 0;
-            if (retry >= ROOT_PREVIEW_RETRY_LIMIT) continue;
+            if (retry >= ROOT_PREVIEW_RETRY_LIMIT) {
+              exhausted.push(failedPath);
+              continue;
+            }
             rootPreviewRetry.current.set(failedPath, retry + 1);
             if (!rootPreviewPendingSet.current.has(failedPath)) {
               rootPreviewPending.current.push(failedPath);
               rootPreviewPendingSet.current.add(failedPath);
             }
           }
+
+          markPreviewFailed(exhausted);
         })
         .finally(() => {
+          window.clearTimeout(timeoutId);
           rootPreviewControllers.current.delete(controller);
           for (const finishedPath of batch) {
             rootPreviewInFlight.current.delete(finishedPath);
@@ -201,7 +244,7 @@ function App() {
           }
         });
     }
-  }, [applyPreviewBatch]);
+  }, [applyPreviewBatch, markPreviewFailed]);
 
   const enqueueRootPreviewPaths = useCallback(
     (paths: string[]) => {
@@ -232,6 +275,7 @@ function App() {
       const matchesText = item.name.toLowerCase().includes(search.toLowerCase());
       if (!matchesText) return false;
       if (!item.countsReady) return true;
+      if (!item.previewReady) return true;
       const hasKind =
         mediaFilter === "image"
           ? item.counts.images + item.counts.gifs > 0
@@ -728,13 +772,15 @@ function App() {
               >
                 <div className="category-item__title">{item.name}</div>
                 <div className="category-item__meta">
-                  {item.countsReady ? (
+                  {!item.countsReady ? (
+                    <span>统计中...</span>
+                  ) : !item.previewReady ? (
+                    <span>统计失败</span>
+                  ) : (
                     <>
                       <span>🖼️ {item.counts.images + item.counts.gifs}</span>
                       <span>🎞️ {item.counts.videos}</span>
                     </>
-                  ) : (
-                    <span>统计中...</span>
                   )}
                 </div>
               </button>
