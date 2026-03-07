@@ -9,7 +9,16 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "tsx --test src/**/*.test.ts",
+    "test:compat": "node --test scripts/backend-compat.test.mjs",
+    "audit:accounts": "node scripts/audit-account-counts.mjs",
+    "contract:compare": "node scripts/contract-compare.mjs",
+    "smoke:playwright": "node scripts/playwright-smoke.mjs",
     "perf:bench": "node scripts/perf-bench.mjs",
+    "perf:bench:synthetic": "PERF_FIXTURE_MODE=synthetic node scripts/perf-bench.mjs",
+    "perf:compare": "node scripts/perf-compare.mjs",
+    "perf:compare:repeat": "node scripts/perf-compare.mjs --iterations 3",
+    "perf:compare:synthetic": "PERF_FIXTURE_MODE=synthetic node scripts/perf-compare.mjs",
+    "perf:profile:rust:persisted": "node scripts/profile-rust-persisted.mjs",
     "perf:assert": "node scripts/perf-assert.mjs"
   },
   "keywords": [],
@@ -17,11 +26,13 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@tmv/shared-types": "file:../shared-types",
     "@fastify/cors": "^11.2.0",
     "fastify": "^5.7.4"
   },
   "devDependencies": {
     "@types/node": "^25.0.3",
+    "playwright": "^1.57.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

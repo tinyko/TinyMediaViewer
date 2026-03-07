@@ -1,11 +1,12 @@
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "path";
+import { setImmediate as yieldToEventLoop } from "timers/promises";
 
 interface StoredSnapshot<T> {
   version: number;
   key: string;
-  mtimeMs: number;
+  stamp: string;
   createdAt: number;
   snapshot: T;
 }
@@ -16,10 +17,13 @@ interface IndexStoreOptions {
   version: number;
 }
 
-export class IndexStore<T> {
+const SERIALIZE_FLUSH_THRESHOLD = 64 * 1024;
+const SERIALIZE_YIELD_EVERY_CHUNKS = 256;
+
+export class IndexStore {
   constructor(private readonly options: IndexStoreOptions) {}
 
-  async readSnapshot(key: string, expectedMtimeMs?: number): Promise<T | null> {
+  async readSnapshot<T>(key: string, expectedStamp?: string): Promise<T | null> {
     const filePath = this.filePathForKey(key);
     let content: string;
     try {
@@ -47,30 +51,31 @@ export class IndexStore<T> {
       await this.invalidate(key);
       return null;
     }
-    if (
-      typeof expectedMtimeMs === "number" &&
-      Number.isFinite(expectedMtimeMs) &&
-      parsed.mtimeMs !== expectedMtimeMs
-    ) {
+    if (typeof expectedStamp === "string" && parsed.stamp !== expectedStamp) {
       return null;
     }
 
     return parsed.snapshot;
   }
 
-  async writeSnapshot(key: string, mtimeMs: number, snapshot: T): Promise<void> {
+  async writeSnapshot<T>(key: string, stamp: string, snapshot: T): Promise<void> {
     await this.ensureDir();
     const finalPath = this.filePathForKey(key);
     const tempPath = `${finalPath}.${process.pid}.${Date.now()}.tmp`;
     const payload: StoredSnapshot<T> = {
       version: this.options.version,
       key,
-      mtimeMs,
+      stamp,
       createdAt: Date.now(),
       snapshot,
     };
 
-    await fs.writeFile(tempPath, JSON.stringify(payload));
+    try {
+      await writeSerializedJson(tempPath, payload);
+    } catch (error) {
+      await fs.rm(tempPath, { force: true });
+      throw error;
+    }
     await fs.rename(tempPath, finalPath);
     await this.enforceMaxBytes();
   }
@@ -123,3 +128,119 @@ export class IndexStore<T> {
     }
   }
 }
+
+const normalizeJsonValue = (value: unknown, inArray: boolean): unknown | undefined => {
+  if (
+    value &&
+    typeof value === "object" &&
+    "toJSON" in value &&
+    typeof (value as { toJSON?: () => unknown }).toJSON === "function"
+  ) {
+    value = (value as { toJSON: () => unknown }).toJSON();
+  }
+
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value;
+    case "number":
+      return Number.isFinite(value) ? value : null;
+    case "bigint":
+      throw new TypeError("Do not know how to serialize a BigInt");
+    case "undefined":
+    case "function":
+    case "symbol":
+      return inArray ? null : undefined;
+    case "object":
+      return value;
+    default:
+      return null;
+  }
+};
+
+function* serializeNormalizedJson(
+  value: unknown,
+  seen: WeakSet<object>
+): Generator<string> {
+  if (value === null || typeof value !== "object") {
+    yield JSON.stringify(value);
+    return;
+  }
+
+  if (seen.has(value)) {
+    throw new TypeError("Converting circular structure to JSON");
+  }
+
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      yield "[";
+      for (let index = 0; index < value.length; index += 1) {
+        if (index > 0) yield ",";
+        const normalizedItem = normalizeJsonValue(value[index], true);
+        if (normalizedItem === undefined) {
+          yield "null";
+        } else {
+          yield* serializeNormalizedJson(normalizedItem, seen);
+        }
+      }
+      yield "]";
+      return;
+    }
+
+    yield "{";
+    let first = true;
+    for (const [key, rawValue] of Object.entries(value)) {
+      const normalizedValue = normalizeJsonValue(rawValue, false);
+      if (normalizedValue === undefined) continue;
+      if (!first) yield ",";
+      first = false;
+      yield JSON.stringify(key);
+      yield ":";
+      yield* serializeNormalizedJson(normalizedValue, seen);
+    }
+    yield "}";
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function* serializeJson(value: unknown): Generator<string> {
+  const normalizedValue = normalizeJsonValue(value, false);
+  if (normalizedValue === undefined) {
+    throw new TypeError("Unable to serialize top-level JSON value");
+  }
+  yield* serializeNormalizedJson(normalizedValue, new WeakSet<object>());
+}
+
+const writeSerializedJson = async (filePath: string, value: unknown) => {
+  const handle = await fs.open(filePath, "w");
+  try {
+    let buffer = "";
+    let chunkCount = 0;
+
+    for (const chunk of serializeJson(value)) {
+      buffer += chunk;
+      chunkCount += 1;
+
+      if (buffer.length >= SERIALIZE_FLUSH_THRESHOLD) {
+        await handle.write(buffer);
+        buffer = "";
+      }
+
+      if (chunkCount % SERIALIZE_YIELD_EVERY_CHUNKS === 0) {
+        if (buffer) {
+          await handle.write(buffer);
+          buffer = "";
+        }
+        await yieldToEventLoop();
+      }
+    }
+
+    if (buffer) {
+      await handle.write(buffer);
+    }
+  } finally {
+    await handle.close();
+  }
+};

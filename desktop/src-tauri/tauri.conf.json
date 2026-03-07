@@ -37,7 +37,7 @@
     "targets": ["dmg"],
     "resources": [
       "resources/viewer/**/*",
-      "binaries/media-viewer-server-aarch64-apple-darwin"
+      "binaries/tmv-backend-app-aarch64-apple-darwin"
     ],
     "icon": [
       "icons/32x32.png",

@@ -251,7 +251,7 @@ fn setup_tray(app: &AppHandle) -> Result<(), String> {
                     let state = app_handle.state::<AppRuntime>();
                     let viewer_url = {
                         let inner = state.inner.lock().await;
-                        inner.runtime.viewer_url.clone()
+                        inner.runtime.viewer_local_url.clone()
                     };
 
                     if !viewer_url.is_empty() {

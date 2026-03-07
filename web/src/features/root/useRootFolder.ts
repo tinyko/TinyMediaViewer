@@ -21,7 +21,7 @@ export function useRootFolder(options: UseRootFolderOptions = {}) {
   const abortRef = useRef<AbortController | null>(null);
   const requestSeq = useRef(0);
 
-  const loadRoot = useCallback(async () => {
+  const loadRoot = useCallback(async (): Promise<FolderPayload | null> => {
     abortRef.current?.abort();
     onBeforeLoad?.();
     const controller = new AbortController();
@@ -37,12 +37,14 @@ export function useRootFolder(options: UseRootFolderOptions = {}) {
         mode: "light",
         signal: controller.signal,
       });
-      if (requestId !== requestSeq.current) return;
+      if (requestId !== requestSeq.current) return null;
       setFolder(payload);
+      return payload;
     } catch (err) {
-      if (isAbortError(err)) return;
+      if (isAbortError(err)) return null;
       const message = err instanceof Error ? err.message : "加载失败";
       setError(message);
+      return null;
     } finally {
       if (requestId === requestSeq.current) {
         setLoading(false);

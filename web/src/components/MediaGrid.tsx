@@ -1,11 +1,19 @@
-import { memo, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+  type SyntheticEvent,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { MediaItem } from "../types";
 import { formatBytes, formatDate } from "../utils";
 
 const GRID_GAP = 12;
 const CARD_MIN_WIDTH = 220;
-const ROW_ESTIMATE = 250;
+const ROW_ESTIMATE = 280;
 const FALLBACK_RENDER_LIMIT = 80;
 
 interface MediaGridProps {
@@ -34,6 +42,27 @@ const MediaCard = memo(function MediaCard({
   hoveredCardRef,
   onSelect,
 }: MediaCardProps) {
+  const [failedThumbnailUrl, setFailedThumbnailUrl] = useState<string | null>(null);
+
+  const handleVideoLoadedMetadata = (event: SyntheticEvent<HTMLVideoElement>) => {
+    const video = event.currentTarget;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    // Seek slightly past 0s to improve first-frame rendering on mobile browsers.
+    const previewTime = duration > 0.2 ? 0.1 : 0;
+    if (previewTime <= 0) return;
+    try {
+      if (Math.abs(video.currentTime - previewTime) > 0.01) {
+        video.currentTime = previewTime;
+      }
+    } catch {
+      // Some browsers/webviews may reject programmatic seeking before enough data is buffered.
+    }
+  };
+
+  const isThumbnailFailed = Boolean(item.thumbnailUrl && failedThumbnailUrl === item.thumbnailUrl);
+  const showVideoElement = item.kind === "video" && (!item.thumbnailUrl || isThumbnailFailed);
+  const imageSrc = !isThumbnailFailed && item.thumbnailUrl ? item.thumbnailUrl : item.url;
+
   return (
     <button
       key={`${categoryPath ?? "root"}-${item.path}`}
@@ -49,12 +78,26 @@ const MediaCard = memo(function MediaCard({
         event.currentTarget.classList.remove("heart-beat");
       }}
     >
-      {item.kind === "video" ? (
-        <video muted playsInline preload="metadata">
-          <source src={item.url} />
-        </video>
+      {showVideoElement ? (
+        <video
+          muted
+          playsInline
+          preload="metadata"
+          src={`${item.url}#t=0.001`}
+          onLoadedMetadata={handleVideoLoadedMetadata}
+        />
       ) : (
-        <img src={item.url} alt={item.name} loading="lazy" decoding="async" />
+        <img
+          src={imageSrc}
+          alt={item.name}
+          loading="lazy"
+          decoding="async"
+          onError={() => {
+            if (item.thumbnailUrl) {
+              setFailedThumbnailUrl(item.thumbnailUrl);
+            }
+          }}
+        />
       )}
       <div className="media-card__meta">
         <div>
@@ -106,9 +149,13 @@ export function MediaGrid({
     count: rowCount,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_ESTIMATE,
-    overscan: 4,
+    overscan: 2,
     initialRect: { width: 960, height: 740 },
   });
+
+  useEffect(() => {
+    rowVirtualizer.measure();
+  }, [columnCount, items.length, rowVirtualizer]);
 
   const virtualRows = rowVirtualizer.getVirtualItems();
   const fallbackItems = useMemo(
@@ -146,6 +193,8 @@ export function MediaGrid({
                 return (
                   <div
                     key={row.key}
+                    data-index={row.index}
+                    ref={rowVirtualizer.measureElement}
                     className="media-grid-row"
                     style={{
                       transform: `translateY(${row.start}px)`,

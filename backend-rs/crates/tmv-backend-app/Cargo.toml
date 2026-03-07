@@ -1,0 +1,20 @@
+[package]
+name = "tmv-backend-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+dirs.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tmv-backend-api = { path = "../tmv-backend-api" }
+tmv-backend-core = { path = "../tmv-backend-core" }
+tmv-backend-index = { path = "../tmv-backend-index" }

@@ -1,10 +1,10 @@
 use crate::{
-    config::{RuntimeState, Settings},
+    config::{RuntimeState, Settings, ViewerAccessMode},
     diagnostics::DiagnosticsStore,
     viewer_gateway::{self, GatewayHandle},
 };
 use std::{
-    fs,
+    env, fs,
     fs::OpenOptions,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     os::unix::fs::PermissionsExt,
@@ -12,19 +12,24 @@ use std::{
     process::Command,
     process::Stdio,
     sync::Arc,
-    time::Duration,
-    time::SystemTime,
-    time::UNIX_EPOCH,
+    time::{Duration, SystemTime},
 };
 use tauri::{path::BaseDirectory, AppHandle, Manager};
 use tokio::process::Child;
 
-const SIDECAR_NAME: &str = "media-viewer-server-aarch64-apple-darwin";
+const RUST_BACKEND_NAME: &str = "tmv-backend-app-aarch64-apple-darwin";
+const NODE_BACKEND_NAME: &str = "media-viewer-server-aarch64-apple-darwin";
 const HEALTH_CHECK_RETRIES: usize = 40;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendImplementation {
+    Node,
+    Rust,
+}
 
 pub struct ServiceManager {
     server_child: Option<Child>,
-    gateway: Option<GatewayHandle>,
+    gateway_handle: Option<GatewayHandle>,
     diagnostics: Arc<DiagnosticsStore>,
 }
 
@@ -32,7 +37,7 @@ impl ServiceManager {
     pub fn new(diagnostics: Arc<DiagnosticsStore>) -> Self {
         Self {
             server_child: None,
-            gateway: None,
+            gateway_handle: None,
             diagnostics,
         }
     }
@@ -44,56 +49,15 @@ impl ServiceManager {
     ) -> Result<RuntimeState, String> {
         self.stop().await;
 
-        let api_port = reserve_ephemeral_port()?;
-        let sidecar_path = resolve_sidecar_path(app)?;
-        ensure_executable(&sidecar_path)?;
-        let media_access_token = build_media_access_token(api_port);
-        let diagnostics_dir = self.diagnostics.diagnostics_dir();
-        let stdout_log = open_sidecar_log(&diagnostics_dir, "sidecar.stdout.log")?;
-        let stderr_log = open_sidecar_log(&diagnostics_dir, "sidecar.stderr.log")?;
-
-        let child = tokio::process::Command::new(&sidecar_path)
-            .env("MEDIA_ROOT", &settings.home_dir)
-            .env("PORT", api_port.to_string())
-            .env("SERVER_HOST", "127.0.0.1")
-            .env("TMV_PARENT_PID", std::process::id().to_string())
-            .env("MEDIA_ACCESS_TOKEN", &media_access_token)
-            .env("REQUIRE_LAN_TOKEN", "true")
-            .env("TMV_DIAGNOSTICS_DIR", diagnostics_dir)
-            .kill_on_drop(true)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout_log))
-            .stderr(Stdio::from(stderr_log))
-            .spawn()
-            .map_err(|error| {
-                format!(
-                    "Failed to spawn sidecar {}: {error}",
-                    sidecar_path.display()
-                )
-            })?;
-
-        self.server_child = Some(child);
-        self.wait_for_server_health(api_port).await?;
-
-        let viewer_port = find_available_port(settings.preferred_viewer_port)?;
-        let viewer_dir = resolve_viewer_assets_path(app)?;
-        let gateway = viewer_gateway::start_gateway(
-            viewer_dir,
-            viewer_port,
-            api_port,
-            media_access_token,
-            self.diagnostics.clone(),
-        )
-        .await?;
-        self.gateway = Some(gateway);
-        let lan_ip = detect_lan_ipv4();
-
-        Ok(RuntimeState::running(viewer_port, api_port, &lan_ip))
+        match selected_backend_impl() {
+            BackendImplementation::Rust => self.restart_rust_backend(app, settings).await,
+            BackendImplementation::Node => self.restart_node_backend(app, settings).await,
+        }
     }
 
     pub async fn stop(&mut self) {
-        if let Some(gateway) = self.gateway.take() {
-            gateway.stop().await;
+        if let Some(gateway_handle) = self.gateway_handle.take() {
+            gateway_handle.stop().await;
         }
 
         if let Some(mut child) = self.server_child.take() {
@@ -102,8 +66,144 @@ impl ServiceManager {
         }
     }
 
-    async fn wait_for_server_health(&mut self, api_port: u16) -> Result<(), String> {
-        let url = format!("http://127.0.0.1:{api_port}/health");
+    async fn restart_rust_backend(
+        &mut self,
+        app: &AppHandle,
+        settings: &Settings,
+    ) -> Result<RuntimeState, String> {
+        let viewer_port = find_available_port(settings.preferred_viewer_port)?;
+        let backend_path = resolve_rust_backend_path(app)?;
+        ensure_executable(&backend_path)?;
+        let viewer_dir = resolve_viewer_assets_path(app)?;
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+        let index_dir = app_data_dir.join("backend-index");
+        let thumbnail_dir = app_data_dir.join("thumbnails");
+        let diagnostics_dir = self.diagnostics.diagnostics_dir();
+        let stdout_log = open_sidecar_log(&diagnostics_dir, "rust-backend.stdout.log")?;
+        let stderr_log = open_sidecar_log(&diagnostics_dir, "rust-backend.stderr.log")?;
+
+        let bind_host = match settings.viewer_access_mode {
+            ViewerAccessMode::Local => "127.0.0.1",
+            ViewerAccessMode::Lan => "0.0.0.0",
+        };
+        let access_mode = match settings.viewer_access_mode {
+            ViewerAccessMode::Local => "local",
+            ViewerAccessMode::Lan => "lan",
+        };
+
+        let child = tokio::process::Command::new(&backend_path)
+            .env("TMV_RUNTIME_MODE", "desktop")
+            .env("TMV_MEDIA_ROOT", &settings.home_dir)
+            .env("TMV_PORT", viewer_port.to_string())
+            .env("TMV_BIND_HOST", bind_host)
+            .env("TMV_ACCESS_MODE", access_mode)
+            .env("TMV_LAN_PASSWORD", &settings.lan_password)
+            .env("TMV_VIEWER_DIR", &viewer_dir)
+            .env("TMV_INDEX_DIR", &index_dir)
+            .env("TMV_THUMBNAIL_DIR", &thumbnail_dir)
+            .env("TMV_DIAGNOSTICS_DIR", diagnostics_dir)
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log))
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "Failed to spawn Rust backend {}: {error}",
+                    backend_path.display()
+                )
+            })?;
+
+        self.server_child = Some(child);
+        self.wait_for_server_health(&format!("http://127.0.0.1:{viewer_port}/health"))
+            .await?;
+
+        let viewer_url = match settings.viewer_access_mode {
+            ViewerAccessMode::Lan => {
+                let lan_ip = detect_lan_ipv4();
+                Some(format!("http://{lan_ip}:{viewer_port}"))
+            }
+            ViewerAccessMode::Local => None,
+        };
+
+        Ok(RuntimeState::running("rust", viewer_port, viewer_port, viewer_url))
+    }
+
+    async fn restart_node_backend(
+        &mut self,
+        app: &AppHandle,
+        settings: &Settings,
+    ) -> Result<RuntimeState, String> {
+        let viewer_port = find_available_port(settings.preferred_viewer_port)?;
+        let api_port = find_available_port(viewer_port.saturating_add(1).max(1))?;
+        let backend_path = resolve_node_backend_path(app)?;
+        ensure_executable(&backend_path)?;
+        let viewer_dir = resolve_viewer_assets_path(app)?;
+        let app_data_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
+        let diagnostics_dir = self.diagnostics.diagnostics_dir();
+        let stdout_log = open_sidecar_log(&diagnostics_dir, "node-backend.stdout.log")?;
+        let stderr_log = open_sidecar_log(&diagnostics_dir, "node-backend.stderr.log")?;
+        let access_token = build_runtime_token();
+
+        let child = tokio::process::Command::new(&backend_path)
+            .env("PORT", api_port.to_string())
+            .env("SERVER_HOST", "127.0.0.1")
+            .env("MEDIA_ROOT", &settings.home_dir)
+            .env("REQUIRE_LAN_TOKEN", "true")
+            .env("MEDIA_ACCESS_TOKEN", &access_token)
+            .env(
+                "CORS_ALLOWED_ORIGINS",
+                format!("http://127.0.0.1:{viewer_port}"),
+            )
+            .env("INDEX_DIR", app_data_dir.join("index"))
+            .env("THUMBNAIL_CACHE_DIR", app_data_dir.join("thumbnails"))
+            .env("TMV_DIAGNOSTICS_DIR", &diagnostics_dir)
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log))
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "Failed to spawn Node backend {}: {error}",
+                    backend_path.display()
+                )
+            })?;
+
+        self.server_child = Some(child);
+        self.wait_for_server_health(&format!("http://127.0.0.1:{api_port}/health"))
+            .await?;
+
+        let gateway_handle = viewer_gateway::start_gateway(
+            viewer_dir,
+            viewer_port,
+            api_port,
+            access_token,
+            settings.viewer_access_mode.clone(),
+            settings.lan_password.clone(),
+            self.diagnostics.clone(),
+        )
+        .await?;
+        self.gateway_handle = Some(gateway_handle);
+
+        let viewer_url = match settings.viewer_access_mode {
+            ViewerAccessMode::Lan => {
+                let lan_ip = detect_lan_ipv4();
+                Some(format!("http://{lan_ip}:{viewer_port}"))
+            }
+            ViewerAccessMode::Local => None,
+        };
+
+        Ok(RuntimeState::running("node", viewer_port, api_port, viewer_url))
+    }
+
+    async fn wait_for_server_health(&mut self, url: &str) -> Result<(), String> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(400))
             .build()
@@ -113,13 +213,13 @@ impl ServiceManager {
             if let Some(child) = self.server_child.as_mut() {
                 if let Some(status) = child
                     .try_wait()
-                    .map_err(|error| format!("Failed checking sidecar status: {error}"))?
+                    .map_err(|error| format!("Failed checking backend status: {error}"))?
                 {
-                    return Err(format!("Sidecar exited unexpectedly: {status}"));
+                    return Err(format!("Backend exited unexpectedly: {status}"));
                 }
             }
 
-            if let Ok(response) = client.get(&url).send().await {
+            if let Ok(response) = client.get(url).send().await {
                 if response.status().is_success() {
                     return Ok(());
                 }
@@ -128,19 +228,28 @@ impl ServiceManager {
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
 
-        Err("Timed out waiting for sidecar health check".to_string())
+        Err("Timed out waiting for backend health check".to_string())
     }
 }
 
-fn reserve_ephemeral_port() -> Result<u16, String> {
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-        .map_err(|error| format!("Failed reserving API port: {error}"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|error| format!("Failed reading reserved API port: {error}"))?
-        .port();
-    drop(listener);
-    Ok(port)
+fn selected_backend_impl() -> BackendImplementation {
+    match env::var("TMV_DESKTOP_BACKEND_IMPL")
+        .unwrap_or_else(|_| "rust".to_string())
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "rust" => BackendImplementation::Rust,
+        _ => BackendImplementation::Node,
+    }
+}
+
+fn build_runtime_token() -> String {
+    format!(
+        "tmv-{:x}-{:x}",
+        build_tmp_suffix(),
+        u128::from(std::process::id())
+    )
 }
 
 fn find_available_port(preferred_port: u16) -> Result<u16, String> {
@@ -168,7 +277,6 @@ fn detect_lan_ipv4() -> String {
 
 #[cfg(target_os = "macos")]
 fn detect_macos_primary_lan_ipv4() -> Option<Ipv4Addr> {
-    // Prioritize normal physical interfaces to avoid VPN/virtual adapter addresses.
     for interface in ["en0", "en1"] {
         if let Some(ip) = read_ipv4_from_ipconfig(interface) {
             return Some(ip);
@@ -223,37 +331,67 @@ fn detect_route_ipv4() -> Option<Ipv4Addr> {
         return Some(ipv4);
     }
 
-    // Avoid showing VPN-like non-private addresses as LAN URL.
     None
 }
 
-fn resolve_sidecar_path(app: &AppHandle) -> Result<PathBuf, String> {
+fn resolve_rust_backend_path(app: &AppHandle) -> Result<PathBuf, String> {
+    resolve_backend_path(
+        app,
+        RUST_BACKEND_NAME,
+        &[
+            "backend-rs/target/debug/tmv-backend-app",
+            "backend-rs/target/release/tmv-backend-app",
+        ],
+    )
+}
+
+fn resolve_node_backend_path(app: &AppHandle) -> Result<PathBuf, String> {
+    resolve_backend_path(
+        app,
+        NODE_BACKEND_NAME,
+        &["desktop/src-tauri/binaries/media-viewer-server-aarch64-apple-darwin"],
+    )
+}
+
+fn resolve_backend_path(
+    app: &AppHandle,
+    bundled_name: &str,
+    source_candidates: &[&str],
+) -> Result<PathBuf, String> {
     let resource_dir = app
         .path()
         .resource_dir()
         .map_err(|error| format!("Failed to resolve resource dir: {error}"))?;
-    let bundled = resource_dir.join("binaries").join(SIDECAR_NAME);
+    let bundled = resource_dir.join("binaries").join(bundled_name);
 
     if bundled.exists() {
-        return copy_sidecar_to_runtime_bin(app, &bundled);
+        return copy_sidecar_to_runtime_bin(app, bundled_name, &bundled);
     }
 
-    let from_source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries")
-        .join(SIDECAR_NAME);
-
-    if from_source.exists() {
-        return Ok(from_source);
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .canonicalize()
+        .map_err(|error| format!("Failed to resolve repo root: {error}"))?;
+    for candidate in source_candidates {
+        let path = repo_root.join(candidate);
+        if path.exists() {
+            return Ok(path);
+        }
     }
 
     Err(format!(
-        "Sidecar binary not found. Expected {} or {}",
+        "Backend binary not found. Expected bundled {} or one of {:?}",
         bundled.display(),
-        from_source.display()
+        source_candidates
     ))
 }
 
-fn copy_sidecar_to_runtime_bin(app: &AppHandle, source: &PathBuf) -> Result<PathBuf, String> {
+fn copy_sidecar_to_runtime_bin(
+    app: &AppHandle,
+    binary_name: &str,
+    source: &PathBuf,
+) -> Result<PathBuf, String> {
     let app_data_dir = app
         .path()
         .app_data_dir()
@@ -262,36 +400,35 @@ fn copy_sidecar_to_runtime_bin(app: &AppHandle, source: &PathBuf) -> Result<Path
     fs::create_dir_all(&runtime_bin_dir)
         .map_err(|error| format!("Failed to create runtime bin dir: {error}"))?;
 
-    cleanup_old_runtime_sidecars(&runtime_bin_dir, 8)?;
+    cleanup_old_runtime_sidecars(&runtime_bin_dir, binary_name, 8)?;
 
-    let destination = runtime_bin_dir.join(format!("{SIDECAR_NAME}-{}", std::process::id()));
+    let destination = runtime_bin_dir.join(format!("{binary_name}-{}", std::process::id()));
     let temp_destination = runtime_bin_dir.join(format!(
-        "{SIDECAR_NAME}-{}.tmp-{}",
+        "{binary_name}-{}.tmp-{}",
         std::process::id(),
         build_tmp_suffix()
     ));
 
-    // Copy to a temp file first, then atomically rename into place.
     fs::copy(source, &temp_destination).map_err(|error| {
         format!(
-            "Failed to copy sidecar from {} to {}: {error}",
+            "Failed to copy backend from {} to {}: {error}",
             source.display(),
             temp_destination.display()
         )
     })?;
 
     let mut permissions = fs::metadata(&temp_destination)
-        .map_err(|error| format!("Failed to read runtime sidecar metadata: {error}"))?
+        .map_err(|error| format!("Failed to read runtime backend metadata: {error}"))?
         .permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&temp_destination, permissions)
-        .map_err(|error| format!("Failed to set runtime sidecar executable bit: {error}"))?;
+        .map_err(|error| format!("Failed to set runtime backend executable bit: {error}"))?;
 
     ad_hoc_codesign(&temp_destination)?;
 
     fs::rename(&temp_destination, &destination).map_err(|error| {
         format!(
-            "Failed to finalize runtime sidecar {} -> {}: {error}",
+            "Failed to finalize runtime backend {} -> {}: {error}",
             temp_destination.display(),
             destination.display()
         )
@@ -325,41 +462,28 @@ fn ensure_executable(path: &PathBuf) -> Result<(), String> {
     #[cfg(unix)]
     {
         let metadata = std::fs::metadata(path)
-            .map_err(|error| format!("Failed to read sidecar metadata: {error}"))?;
+            .map_err(|error| format!("Failed to read backend metadata: {error}"))?;
         let mut permissions = metadata.permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions)
-            .map_err(|error| format!("Failed to set sidecar executable bit: {error}"))?;
+            .map_err(|error| format!("Failed to set backend executable bit: {error}"))?;
     }
 
     Ok(())
 }
 
-fn build_media_access_token(api_port: u16) -> String {
-    let now_nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("tmv-{api_port}-{pid}-{now_nanos}", pid = std::process::id())
-}
-
 fn build_tmp_suffix() -> u128 {
     SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+        .duration_since(SystemTime::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or(0)
 }
 
-fn cleanup_old_runtime_sidecars(dir: &Path, keep: usize) -> Result<(), String> {
+fn cleanup_old_runtime_sidecars(dir: &Path, prefix: &str, keep: usize) -> Result<(), String> {
     let mut sidecars = fs::read_dir(dir)
         .map_err(|error| format!("Failed to read runtime bin dir {}: {error}", dir.display()))?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(SIDECAR_NAME)
-        })
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(prefix))
         .collect::<Vec<_>>();
 
     if sidecars.len() <= keep {
@@ -396,7 +520,7 @@ fn ad_hoc_codesign(path: &Path) -> Result<(), String> {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     Err(format!(
-        "Failed to ad-hoc sign runtime sidecar {}: status={} stderr={} stdout={}",
+        "Failed to ad-hoc sign runtime backend {}: status={} stderr={} stdout={}",
         path.display(),
         output.status,
         stderr,
@@ -421,5 +545,5 @@ fn open_sidecar_log(dir: &Path, filename: &str) -> Result<std::fs::File, String>
         .create(true)
         .append(true)
         .open(&path)
-        .map_err(|error| format!("Failed to open sidecar log {}: {error}", path.display()))
+        .map_err(|error| format!("Failed to open backend log {}: {error}", path.display()))
 }

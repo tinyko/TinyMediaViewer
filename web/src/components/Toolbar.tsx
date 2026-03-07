@@ -14,6 +14,10 @@ interface ToolbarProps {
   perfNotice: string | null;
   loading: boolean;
   error: string | null;
+  requiresAuth: boolean;
+  onReauthenticate: () => void;
+  refreshing: boolean;
+  onRefresh: () => void;
   sortMode: "time" | "name";
   setSortMode: (mode: "time" | "name") => void;
   search: string;
@@ -46,6 +50,10 @@ export function Toolbar(props: ToolbarProps) {
     perfNotice,
     loading,
     error,
+    requiresAuth,
+    onReauthenticate,
+    refreshing,
+    onRefresh,
     sortMode,
     setSortMode,
     search,
@@ -132,6 +140,15 @@ export function Toolbar(props: ToolbarProps) {
             className="search-input"
           />
 
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={onRefresh}
+            disabled={refreshing}
+          >
+            {refreshing ? "刷新中..." : "刷新"}
+          </button>
+
           <div className="controls__cluster">
             <div className="meter-pill" aria-label="媒体计数">
               <div className="meter-pill__fill" style={{ width: `${meterPercent}%` }} />
@@ -179,9 +196,13 @@ export function Toolbar(props: ToolbarProps) {
           </div>
           {loading && <span className="pill">加载中...</span>}
           {error && <span className="pill error">{error}</span>}
+          {requiresAuth && (
+            <button className="ghost-button" type="button" onClick={onReauthenticate}>
+              手动重新登录
+            </button>
+          )}
         </div>
       </div>
     </>
   );
 }
-

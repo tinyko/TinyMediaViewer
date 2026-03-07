@@ -1,15 +1,20 @@
-use crate::diagnostics::{DiagnosticsStore, PerfDiagEventsInput, PreviewDiagEventsInput};
+use crate::{
+    config::ViewerAccessMode,
+    diagnostics::{DiagnosticsStore, PerfDiagEventsInput, PreviewDiagEventsInput},
+};
 use axum::{
     body::{to_bytes, Body},
-    extract::{Request, State},
-    http::{header, StatusCode, Uri},
+    extract::{ConnectInfo, Request, State},
+    http::{header, HeaderMap, StatusCode, Uri},
+    middleware::{self, Next},
     response::Response,
     routing::{any, post},
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::Client;
 use std::{
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Component, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -24,6 +29,8 @@ const MAX_PROXY_BODY_BYTES: usize = 32 * 1024 * 1024;
 const TRACE_HEADER_ID: &str = "x-tmv-trace-id";
 const TRACE_HEADER_ROUTE: &str = "x-tmv-route";
 const TRACE_HEADER_UPSTREAM_STATUS: &str = "x-tmv-upstream-status";
+const BASIC_AUTH_REALM: &str = "TinyMediaViewer";
+const BASIC_AUTH_USERNAME: &str = "tmv";
 static TRACE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub struct GatewayHandle {
@@ -37,6 +44,8 @@ struct GatewayState {
     viewer_dir: PathBuf,
     client: Client,
     access_token: String,
+    access_mode: ViewerAccessMode,
+    lan_password: String,
     diagnostics: Arc<DiagnosticsStore>,
 }
 
@@ -57,6 +66,8 @@ pub async fn start_gateway(
     viewer_port: u16,
     api_port: u16,
     access_token: String,
+    access_mode: ViewerAccessMode,
+    lan_password: String,
     diagnostics: Arc<DiagnosticsStore>,
 ) -> Result<GatewayHandle, String> {
     let index_file = viewer_dir.join("index.html");
@@ -77,6 +88,8 @@ pub async fn start_gateway(
         viewer_dir,
         client,
         access_token,
+        access_mode: access_mode.clone(),
+        lan_password,
         diagnostics,
     };
 
@@ -87,17 +100,31 @@ pub async fn start_gateway(
         .route("/api/{*path}", any(proxy_to_api))
         .route("/media", any(proxy_to_api))
         .route("/media/{*path}", any(proxy_to_api))
+        .route("/thumb", any(proxy_to_api))
+        .route("/thumb/{*path}", any(proxy_to_api))
         .fallback(any(serve_viewer))
-        .with_state(app_state);
+        .with_state(app_state.clone())
+        .layer(middleware::from_fn_with_state(
+            app_state,
+            enforce_gateway_access,
+        ));
 
-    let address = SocketAddr::from((Ipv4Addr::UNSPECIFIED, viewer_port));
+    let bind_ip = match access_mode {
+        ViewerAccessMode::Lan => Ipv4Addr::UNSPECIFIED,
+        ViewerAccessMode::Local => Ipv4Addr::LOCALHOST,
+    };
+    let address = SocketAddr::from((bind_ip, viewer_port));
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|error| format!("Failed to bind viewer gateway port {viewer_port}: {error}"))?;
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     let task = tauri::async_runtime::spawn(async move {
-        let server = axum::serve(listener, router).with_graceful_shutdown(async move {
+        let server = axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
             let _ = shutdown_rx.await;
         });
 
@@ -110,6 +137,44 @@ pub async fn start_gateway(
         shutdown_tx: Some(shutdown_tx),
         task: Some(task),
     })
+}
+
+async fn enforce_gateway_access(
+    State(state): State<GatewayState>,
+    ConnectInfo(remote_addr): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if state.access_mode == ViewerAccessMode::Local || is_loopback_client(remote_addr.ip()) {
+        return next.run(request).await;
+    }
+
+    let trace_id = next_trace_id();
+    let started = Instant::now();
+    let method_name = request.method().as_str().to_string();
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| "/".to_string());
+
+    match validate_basic_auth(request.headers(), &state.lan_password) {
+        Ok(()) => next.run(request).await,
+        Err(reason) => {
+            let message = format!("Gateway auth failed for {remote_addr}: {reason}");
+            let _ = state.diagnostics.log_gateway_request(
+                &trace_id,
+                &method_name,
+                "gateway-auth",
+                &path_and_query,
+                StatusCode::UNAUTHORIZED.as_u16(),
+                None,
+                started.elapsed().as_millis(),
+                Some(&message),
+            );
+            build_auth_required_response(message, &trace_id)
+        }
+    }
 }
 
 async fn record_preview_events(
@@ -225,7 +290,8 @@ async fn proxy_to_api(State(state): State<GatewayState>, request: Request) -> Re
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/");
-    let route_tag = if path_and_query.starts_with("/media") {
+    let route_tag = if path_and_query.starts_with("/media") || path_and_query.starts_with("/thumb")
+    {
         "media-proxy"
     } else {
         "api-proxy"
@@ -406,6 +472,57 @@ fn build_trace_response(
         .unwrap_or_else(|_| Response::new(Body::from("Gateway response build failure")))
 }
 
+fn build_auth_required_response(message: String, trace_id: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::UNAUTHORIZED)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            header::WWW_AUTHENTICATE,
+            format!(r#"Basic realm="{BASIC_AUTH_REALM}""#),
+        )
+        .header(TRACE_HEADER_ID, trace_id)
+        .header(TRACE_HEADER_ROUTE, "gateway-auth")
+        .header(TRACE_HEADER_UPSTREAM_STATUS, "-")
+        .body(Body::from(message))
+        .unwrap_or_else(|_| Response::new(Body::from("Gateway response build failure")))
+}
+
+fn is_loopback_client(ip: IpAddr) -> bool {
+    ip.is_loopback()
+}
+
+fn validate_basic_auth(headers: &HeaderMap, expected_password: &str) -> Result<(), &'static str> {
+    if expected_password.is_empty() {
+        return Err("LAN password is not configured");
+    }
+
+    let value = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or("Missing Authorization header")?;
+    let encoded = value
+        .strip_prefix("Basic ")
+        .ok_or("Authorization header is not Basic auth")?;
+    let decoded = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| "Authorization payload is not valid base64")?;
+    let credentials =
+        String::from_utf8(decoded).map_err(|_| "Authorization payload is not valid UTF-8")?;
+    let (username, password) = credentials
+        .split_once(':')
+        .ok_or("Authorization payload is missing username/password")?;
+
+    if username != BASIC_AUTH_USERNAME {
+        return Err("Username is invalid");
+    }
+
+    if password != expected_password {
+        return Err("Password is invalid");
+    }
+
+    Ok(())
+}
+
 fn sanitize_relative_path(path: &str) -> Option<PathBuf> {
     let mut clean = PathBuf::new();
     for component in PathBuf::from(path).components() {
@@ -451,4 +568,43 @@ fn next_trace_id() -> String {
         .unwrap_or(0);
     let sequence = TRACE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("tmv-{now_ms:016x}-{sequence:08x}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_loopback_client, validate_basic_auth};
+    use axum::http::{header, HeaderMap, HeaderValue};
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    fn auth_headers(username: &str, password: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        let payload = BASE64_STANDARD.encode(format!("{username}:{password}"));
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Basic {payload}")).expect("valid authorization header"),
+        );
+        headers
+    }
+
+    #[test]
+    fn basic_auth_accepts_expected_credentials() {
+        let headers = auth_headers("tmv", "supersecret");
+        assert!(validate_basic_auth(&headers, "supersecret").is_ok());
+    }
+
+    #[test]
+    fn basic_auth_rejects_wrong_password() {
+        let headers = auth_headers("tmv", "wrong");
+        assert!(validate_basic_auth(&headers, "supersecret").is_err());
+    }
+
+    #[test]
+    fn loopback_detection_accepts_ipv4_and_ipv6_loopback() {
+        assert!(is_loopback_client(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(is_loopback_client(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(!is_loopback_client(IpAddr::V4(Ipv4Addr::new(
+            192, 168, 1, 42
+        ))));
+    }
 }

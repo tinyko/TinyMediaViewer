@@ -52,12 +52,6 @@ pub struct DiagnosticsState {
     pub root_cause: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreviewDiagEventsInput {
-    pub events: Vec<PreviewDiagEvent>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerfDiagEvent {
@@ -69,6 +63,12 @@ pub struct PerfDiagEvent {
     pub renderer: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewDiagEventsInput {
+    pub events: Vec<PreviewDiagEvent>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,13 +124,20 @@ impl DiagnosticsStore {
     }
 
     pub fn state(&self) -> DiagnosticsState {
-        let inner = self.inner.lock().expect("diagnostics mutex poisoned");
-        let events = inner.events.iter().cloned().collect::<Vec<_>>();
+        let (events, last_error, last_successful_apply_ts) = load_recent_events(&self.events_path);
+        {
+            let mut inner = self.inner.lock().expect("diagnostics mutex poisoned");
+            inner.events = events.clone();
+            inner.last_error = last_error.clone();
+            inner.last_successful_apply_ts = last_successful_apply_ts;
+        }
+
+        let events = events.into_iter().collect::<Vec<_>>();
         DiagnosticsState {
-            events: events.clone(),
-            last_error: inner.last_error.clone(),
-            last_successful_apply_ts: inner.last_successful_apply_ts,
             root_cause: classify_root_cause(&events),
+            events,
+            last_error,
+            last_successful_apply_ts,
         }
     }
 

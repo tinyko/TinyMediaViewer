@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
@@ -73,16 +74,32 @@ const makeLightRootPayload = (): FolderPayload => ({
   totals: { media: 0, subfolders: 2 },
 });
 
-const makeCategoryPayload = (path: string): FolderPayload => ({
+const makeRootPayloadWithSubfolders = (
+  subfolders: FolderPayload["subfolders"]
+): FolderPayload => ({
+  folder: { name: "root", path: "" },
+  breadcrumb: [{ name: "root", path: "" }],
+  subfolders,
+  media: [],
+  totals: { media: 0, subfolders: subfolders.length },
+});
+
+const makeCategoryPayloadWithMedia = (
+  path: string,
+  media: MediaItem[]
+): FolderPayload => ({
   folder: { name: path, path },
   breadcrumb: [
     { name: "root", path: "" },
     { name: path, path },
   ],
   subfolders: [],
-  media: [makeMedia("IMG_20260219_120000.jpg", "image")],
-  totals: { media: 1, subfolders: 0 },
+  media,
+  totals: { media: media.length, subfolders: 0 },
 });
+
+const makeCategoryPayload = (path: string): FolderPayload =>
+  makeCategoryPayloadWithMedia(path, [makeMedia("IMG_20260219_120000.jpg", "image")]);
 
 describe("App root light mode + preview backfill", () => {
   beforeEach(() => {
@@ -269,5 +286,362 @@ describe("App root light mode + preview backfill", () => {
     await waitFor(() => {
       expect(screen.getByText("2 / 4114 媒体")).toBeInTheDocument();
     });
+  });
+
+  it("filters account list by non-zero typed counts and reloads the visible account for the active media kind", async () => {
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        return Promise.resolve({
+          ...makeLightRootPayload(),
+          subfolders: [
+            {
+              ...makeLightRootPayload().subfolders[0],
+              name: "alpha",
+              path: "alpha",
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 2, gifs: 0, videos: 0, subfolders: 0 },
+            },
+            {
+              ...makeLightRootPayload().subfolders[1],
+              name: "beta",
+              path: "beta",
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 0, gifs: 0, videos: 3, subfolders: 0 },
+            },
+          ],
+          totals: { media: 0, subfolders: 2 },
+        });
+      }
+
+      if (targetPath === "beta" && options?.kind === "video") {
+        return Promise.resolve(
+          makeCategoryPayloadWithMedia(targetPath, [makeMedia("clip.mp4", "video")])
+        );
+      }
+
+      return Promise.resolve(
+        makeCategoryPayloadWithMedia(targetPath, [makeMedia("cover.jpg", "image")])
+      );
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    render(<App />);
+
+    expect(await screen.findByRole("button", { name: /alpha/i })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /beta/i })).not.toBeInTheDocument();
+    expect(await screen.findByText("cover.jpg")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "视频" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /alpha/i })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /beta/i })).toBeInTheDocument();
+    });
+    expect(await screen.findByText("clip.mp4")).toBeInTheDocument();
+    expect(
+      mockedFetchFolder.mock.calls.some(
+        ([targetPath, options]) => targetPath === "beta" && options?.kind === "video"
+      )
+    ).toBe(true);
+
+    await userEvent.click(screen.getByRole("button", { name: "图片" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /alpha/i })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /beta/i })).not.toBeInTheDocument();
+    });
+    expect(await screen.findByText("cover.jpg")).toBeInTheDocument();
+    assert.equal(
+      mockedFetchFolder.mock.calls.filter(
+        ([targetPath, options]) => targetPath === "alpha" && options?.kind === "image"
+      ).length,
+      1
+    );
+  });
+
+  it("requests filtered server pages when switching media kind", async () => {
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        return Promise.resolve({
+          ...makeLightRootPayload(),
+          subfolders: [
+            {
+              ...makeLightRootPayload().subfolders[0],
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 2, gifs: 0, videos: 1, subfolders: 0 },
+            },
+          ],
+          totals: { media: 0, subfolders: 1 },
+        });
+      }
+
+      if (options?.kind === "video") {
+        return Promise.resolve({
+          folder: { name: targetPath, path: targetPath },
+          breadcrumb: [
+            { name: "root", path: "" },
+            { name: targetPath, path: targetPath },
+          ],
+          subfolders: [],
+          media: [makeMedia("video_only.mp4", "video")],
+          totals: { media: 3, subfolders: 0 },
+        });
+      }
+
+      return Promise.resolve({
+        folder: { name: targetPath, path: targetPath },
+        breadcrumb: [
+          { name: "root", path: "" },
+          { name: targetPath, path: targetPath },
+        ],
+        subfolders: [],
+        media: [makeMedia("cover.jpg", "image"), makeMedia("detail.jpg", "image")],
+        totals: { media: 3, subfolders: 0 },
+      });
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    render(<App />);
+
+    await screen.findByText("cover.jpg");
+    await userEvent.click(screen.getByRole("button", { name: "视频" }));
+
+    expect(await screen.findByText("video_only.mp4")).toBeInTheDocument();
+    expect(
+      mockedFetchFolder.mock.calls.some(
+        ([targetPath, options]) => targetPath === "alpha" && options?.kind === "video"
+      )
+    ).toBe(true);
+    expect(
+      mockedFetchFolder.mock.calls.some(
+        ([targetPath, options]) => targetPath === "alpha" && options?.cursor === "page-2"
+      )
+    ).toBe(false);
+    expect(screen.queryByText("该账号暂无符合过滤条件的媒体")).not.toBeInTheDocument();
+  });
+
+  it("refreshes root and reloads the current category without mixing stale page data", async () => {
+    const initialRoot = makeRootPayloadWithSubfolders([
+      {
+        ...makeLightRootPayload().subfolders[0],
+        countsReady: true,
+        previewReady: true,
+        counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+      },
+    ]);
+    const refreshedRoot = makeRootPayloadWithSubfolders([
+      {
+        ...initialRoot.subfolders[0],
+        modified: 200,
+      },
+    ]);
+
+    let rootCalls = 0;
+    let alphaCalls = 0;
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        expect(options?.mode).toBe("light");
+        rootCalls += 1;
+        return Promise.resolve(rootCalls === 1 ? initialRoot : refreshedRoot);
+      }
+
+      alphaCalls += 1;
+      return Promise.resolve(
+        alphaCalls === 1
+          ? makeCategoryPayloadWithMedia(targetPath, [makeMedia("A_old.jpg", "image")])
+          : makeCategoryPayloadWithMedia(targetPath, [makeMedia("A_new.jpg", "image")])
+      );
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    render(<App />);
+
+    expect(await screen.findByText("A_old.jpg")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByText("A_new.jpg")).toBeInTheDocument();
+    expect(screen.queryByText("A_old.jpg")).not.toBeInTheDocument();
+    expect(rootCalls).toBe(2);
+    expect(alphaCalls).toBe(2);
+  });
+
+  it("refresh falls back to the first available category when the previous selection disappears", async () => {
+    const initialRoot = makeRootPayloadWithSubfolders([
+      {
+        ...makeLightRootPayload().subfolders[0],
+        countsReady: true,
+        previewReady: true,
+        counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+      },
+      {
+        ...makeLightRootPayload().subfolders[1],
+        countsReady: true,
+        previewReady: true,
+        counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+      },
+    ]);
+    const refreshedRoot = makeRootPayloadWithSubfolders([
+      {
+        name: "gamma",
+        path: "gamma",
+        modified: 300,
+        counts: { images: 0, gifs: 0, videos: 0, subfolders: 0 },
+        previews: [],
+        countsReady: false,
+        previewReady: false,
+        approximate: true,
+      },
+    ]);
+
+    let rootCalls = 0;
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        expect(options?.mode).toBe("light");
+        rootCalls += 1;
+        return Promise.resolve(rootCalls === 1 ? initialRoot : refreshedRoot);
+      }
+
+      if (targetPath === "alpha") {
+        return Promise.resolve(makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")]));
+      }
+      if (targetPath === "beta") {
+        return Promise.resolve(makeCategoryPayloadWithMedia(targetPath, [makeMedia("B.jpg", "image")]));
+      }
+      return Promise.resolve(makeCategoryPayloadWithMedia(targetPath, [makeMedia("G.jpg", "image")]));
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    render(<App />);
+
+    await screen.findByText("A.jpg");
+    await userEvent.click(screen.getByRole("button", { name: /beta/i }));
+    expect(await screen.findByText("B.jpg")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByText("G.jpg")).toBeInTheDocument();
+    expect(screen.queryByText("B.jpg")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /gamma/i })).toBeInTheDocument();
+  });
+
+  it("closes the preview modal when the refreshed first page no longer contains the selected media", async () => {
+    let alphaCalls = 0;
+    mockedFetchFolder.mockImplementation((targetPath = "") => {
+      if (targetPath === "") {
+        return Promise.resolve(
+          makeRootPayloadWithSubfolders([
+            {
+              ...makeLightRootPayload().subfolders[0],
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+            },
+          ])
+        );
+      }
+
+      alphaCalls += 1;
+      return Promise.resolve(
+        alphaCalls === 1
+          ? makeCategoryPayloadWithMedia(targetPath, [makeMedia("Visible.jpg", "image")])
+          : makeCategoryPayloadWithMedia(targetPath, [makeMedia("Replaced.jpg", "image")])
+      );
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    render(<App />);
+
+    const mediaName = await screen.findByText("Visible.jpg");
+    await userEvent.click(mediaName);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect(await screen.findByText("Replaced.jpg")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("restarts root preview backfill after refresh and ignores stale preview batches", async () => {
+    const firstPreviewDeferred = deferred<FolderPreviewBatchOutput>();
+    const secondPreviewDeferred = deferred<FolderPreviewBatchOutput>();
+
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        expect(options?.mode).toBe("light");
+        return Promise.resolve(
+          makeRootPayloadWithSubfolders([
+            {
+              ...makeLightRootPayload().subfolders[0],
+              countsReady: false,
+              previewReady: false,
+              counts: { images: 0, gifs: 0, videos: 0, subfolders: 0 },
+              previews: [],
+              approximate: true,
+            },
+          ])
+        );
+      }
+
+      return Promise.resolve(makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")]));
+    });
+
+    let previewCalls = 0;
+    mockedFetchFolderPreviews.mockImplementation(() => {
+      previewCalls += 1;
+      return previewCalls === 1 ? firstPreviewDeferred.promise : secondPreviewDeferred.promise;
+    });
+
+    render(<App />);
+
+    await waitFor(() => {
+      expect(mockedFetchFolderPreviews).toHaveBeenCalledTimes(1);
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    await waitFor(() => {
+      expect(mockedFetchFolderPreviews).toHaveBeenCalledTimes(2);
+    });
+
+    firstPreviewDeferred.resolve({
+      items: [
+        {
+          name: "alpha",
+          path: "alpha",
+          modified: 100,
+          counts: { images: 9, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [makeMedia("stale.jpg", "image")],
+          countsReady: true,
+          previewReady: true,
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText("🖼️ 9")).not.toBeInTheDocument();
+    });
+
+    secondPreviewDeferred.resolve({
+      items: [
+        {
+          name: "alpha",
+          path: "alpha",
+          modified: 110,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [makeMedia("fresh.jpg", "image")],
+          countsReady: true,
+          previewReady: true,
+        },
+      ],
+    });
+
+    expect(await screen.findByText("🖼️ 1")).toBeInTheDocument();
+    expect(screen.queryByText("🖼️ 9")).not.toBeInTheDocument();
   });
 });

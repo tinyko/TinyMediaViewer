@@ -1,0 +1,20 @@
+[package]
+name = "tmv-backend-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bincode.workspace = true
+futures.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tmv-backend-index = { path = "../tmv-backend-index" }
+tmv-backend-watch = { path = "../tmv-backend-watch" }
+
+[dev-dependencies]
+tempfile.workspace = true

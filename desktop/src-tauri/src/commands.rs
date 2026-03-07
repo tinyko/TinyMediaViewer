@@ -1,6 +1,6 @@
 use crate::{
     apply_autostart,
-    config::{self, AppStatePayload, RuntimeState, Settings},
+    config::{self, AppStatePayload, RuntimeState, Settings, ViewerAccessMode},
     diagnostics::DiagnosticsState,
     AppRuntime,
 };
@@ -15,6 +15,8 @@ pub struct SettingsInput {
     preferred_viewer_port: u16,
     launch_at_login: bool,
     start_hidden: bool,
+    viewer_access_mode: ViewerAccessMode,
+    lan_password: String,
 }
 
 impl SettingsInput {
@@ -24,6 +26,8 @@ impl SettingsInput {
             preferred_viewer_port: self.preferred_viewer_port,
             launch_at_login: self.launch_at_login,
             start_hidden: self.start_hidden,
+            viewer_access_mode: self.viewer_access_mode,
+            lan_password: self.lan_password,
         }
     }
 }
@@ -141,6 +145,10 @@ fn validate_settings(input: &SettingsInput) -> Result<(), String> {
 
     if input.preferred_viewer_port == 0 {
         return Err("preferredViewerPort must be in the range 1..65535".to_string());
+    }
+
+    if input.viewer_access_mode == ViewerAccessMode::Lan && input.lan_password.trim().len() < 8 {
+        return Err("lanPassword must be at least 8 characters in LAN mode".to_string());
     }
 
     Ok(())

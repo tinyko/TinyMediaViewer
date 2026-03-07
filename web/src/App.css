@@ -568,6 +568,7 @@ a,
   width: 100%;
   display: grid;
   gap: 12px;
+  will-change: transform;
 }
 
 .media-card {
@@ -636,6 +637,10 @@ a,
   gap: 6px;
   text-align: left;
   min-width: 0;
+}
+
+.media-card__meta p {
+  margin: 0;
 }
 
 .media-title {
@@ -717,6 +722,11 @@ a,
   border-color: var(--text);
 }
 
+.ghost-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .eyebrow {
   font-size: 12px;
   letter-spacing: 0.08em;
@@ -727,6 +737,7 @@ a,
 
 .muted {
   color: var(--muted);
+  margin: 0;
   margin-top: 2px;
   font-size: 14px;
 }

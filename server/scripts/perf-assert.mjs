@@ -42,11 +42,25 @@ const run = async () => {
   const reportPath = parseReportArg() ?? (await findLatestReport());
   const payload = JSON.parse(await fs.readFile(reportPath, "utf8"));
   const scenarios = payload.scenarios ?? {};
+  const backend = payload.backend ?? "node";
+  const fixtureMode = payload.fixture?.mode ?? "real";
   const failures = [];
 
   const s1Ms = Number(scenarios.s1?.coldSingleMs ?? Number.POSITIVE_INFINITY);
   if (!(s1Ms < THRESHOLDS.s1Ms)) {
     failures.push(`S1 failed: ${s1Ms}ms (expected < ${THRESHOLDS.s1Ms}ms)`);
+  }
+  const s1Status = Number(scenarios.s1?.status ?? 0);
+  if (s1Status !== 200) {
+    failures.push(`S1 failed: status=${s1Status} (expected 200)`);
+  }
+
+  const s1PersistedMs = Number(
+    scenarios.s1?.persistedRestartMs ?? Number.POSITIVE_INFINITY
+  );
+  const s1PersistedStatus = Number(scenarios.s1?.persistedStatus ?? 0);
+  if (s1PersistedStatus !== 200) {
+    failures.push(`S1 persisted failed: status=${s1PersistedStatus} (expected 200)`);
   }
 
   const s2P95Ms = Number(scenarios.s2?.p95Ms ?? Number.POSITIVE_INFINITY);
@@ -62,6 +76,16 @@ const run = async () => {
   const s4ColdMs = Number(scenarios.s4?.coldMs ?? Number.POSITIVE_INFINITY);
   if (!(s4ColdMs < THRESHOLDS.s4ColdMs)) {
     failures.push(`S4 cold failed: ${s4ColdMs}ms (expected < ${THRESHOLDS.s4ColdMs}ms)`);
+  }
+  const hasS4Persisted =
+    typeof scenarios.s4?.persistedRestartMs === "number" ||
+    typeof scenarios.s4?.persistedStatus === "number";
+  const s4PersistedMs = Number(
+    scenarios.s4?.persistedRestartMs ?? Number.POSITIVE_INFINITY
+  );
+  const s4PersistedStatus = Number(scenarios.s4?.persistedStatus ?? 0);
+  if (hasS4Persisted && s4PersistedStatus !== 200) {
+    failures.push(`S4 persisted failed: status=${s4PersistedStatus} (expected 200)`);
   }
 
   const s4HotP95Ms = Number(scenarios.s4?.hotP95Ms ?? Number.POSITIVE_INFINITY);
@@ -92,10 +116,21 @@ const run = async () => {
   console.log(
     JSON.stringify(
       {
+        backend,
+        fixtureMode,
         s1Ms,
+        s1PersistedMs,
+        s1Statuses: {
+          cold: s1Status,
+          persisted: s1PersistedStatus,
+        },
         s2P95Ms,
         s3P95Ms,
         s4ColdMs,
+        s4PersistedMs: hasS4Persisted ? s4PersistedMs : null,
+        s4Statuses: hasS4Persisted
+          ? { cold: Number(scenarios.s4?.coldStatus ?? 0), persisted: s4PersistedStatus }
+          : undefined,
         s4HotP95Ms,
         s6PeakRssMB: Number((peakRssBytes / 1024 / 1024).toFixed(2)),
         s5Statuses: { full: fullStatus, range: rangeStatus },

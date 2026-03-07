@@ -10,6 +10,7 @@ interface FetchFolderOptions {
   cursor?: string;
   limit?: number;
   mode?: "light" | "full";
+  kind?: "image" | "video";
   signal?: AbortSignal;
 }
 
@@ -25,6 +26,9 @@ export async function fetchFolder(
   }
   if (options.mode) {
     params.set("mode", options.mode);
+  }
+  if (options.kind) {
+    params.set("kind", options.kind);
   }
   const query = params.toString();
   const url = query ? `/api/folder?${query}` : "/api/folder";

@@ -1,0 +1,9 @@
+[package]
+name = "tmv-backend-watch"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+notify.workspace = true
+tracing.workspace = true

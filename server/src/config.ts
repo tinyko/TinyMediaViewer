@@ -38,6 +38,7 @@ export interface AppConfig {
   mediaRoot: string;
   port: number;
   host: string;
+  ffmpegBin: string;
   previewLimit: number;
   previewBatchLimit: number;
   maxItemsPerFolder: number;
@@ -51,6 +52,7 @@ export interface AppConfig {
   enableIndexPersist: boolean;
   indexDir: string;
   indexMaxBytes: number;
+  thumbnailCacheDir: string;
   requireLanToken: boolean;
   mediaAccessToken: string;
   corsAllowedOrigins: string[];
@@ -61,6 +63,7 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): AppConfig => {
     mediaRoot: path.resolve(env.MEDIA_ROOT ?? defaultRoot),
     port: asNumber(env.PORT, 4000),
     host: env.SERVER_HOST ?? "0.0.0.0",
+    ffmpegBin: env.FFMPEG_BIN?.trim() || "ffmpeg",
     previewLimit: asNumber(env.PREVIEW_LIMIT, 6),
     previewBatchLimit: asNumber(env.PREVIEW_BATCH_LIMIT, 64),
     maxItemsPerFolder: asNumber(env.MAX_ITEMS_PER_FOLDER, 20000),
@@ -85,6 +88,18 @@ export const loadConfig = (env: NodeJS.ProcessEnv = process.env): AppConfig => {
       )
     ),
     indexMaxBytes: asNumber(env.INDEX_MAX_BYTES, 1024 * 1024 * 1024),
+    thumbnailCacheDir: path.resolve(
+      expandHomePath(
+        env.THUMBNAIL_CACHE_DIR ??
+          path.join(
+            os.homedir(),
+            "Library",
+            "Application Support",
+            "TinyMediaViewer",
+            "thumbnails"
+          )
+      )
+    ),
     requireLanToken: asBoolean(env.REQUIRE_LAN_TOKEN, true),
     mediaAccessToken: env.MEDIA_ACCESS_TOKEN?.trim() || randomToken(),
     corsAllowedOrigins: parseOrigins(env.CORS_ALLOWED_ORIGINS),

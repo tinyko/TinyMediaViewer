@@ -1,6 +1,9 @@
 node_modules
 dist
 .DS_Store
+.playwright-cli
+output
+audit-reports
 web/node_modules
 web/dist
 server/node_modules
@@ -10,5 +13,8 @@ desktop/dist
 desktop/src-tauri/target
 desktop/src-tauri/resources/viewer
 desktop/src-tauri/binaries
+backend-rs/target
+backend-rs/.tmp
 server/.tmp
 server/perf-reports
+server/audit-reports

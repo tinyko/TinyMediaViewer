@@ -3,6 +3,7 @@ import cors from "@fastify/cors";
 import { AppConfig, isOriginAllowed } from "./config";
 import { registerRoutes } from "./routes";
 import { MediaScanner } from "./scanner";
+import { VideoThumbnailCache } from "./video_thumbnail_cache";
 
 export const buildServer = (appConfig: AppConfig) => {
   const fastify = Fastify({
@@ -29,7 +30,14 @@ export const buildServer = (appConfig: AppConfig) => {
     appConfig.indexDir,
     appConfig.indexMaxBytes
   );
-  void registerRoutes(fastify, scanner, appConfig);
+  const thumbnailCache = new VideoThumbnailCache(
+    appConfig.thumbnailCacheDir,
+    appConfig.ffmpegBin
+  );
+  void registerRoutes(fastify, scanner, thumbnailCache, appConfig);
+  fastify.addHook("onClose", () => {
+    scanner.close();
+  });
 
   fastify.addHook("onReady", () => {
     fastify.log.info(
@@ -38,6 +46,7 @@ export const buildServer = (appConfig: AppConfig) => {
         previewLimit: appConfig.previewLimit,
         folderPageLimit: appConfig.folderPageLimit,
         previewBatchLimit: appConfig.previewBatchLimit,
+        thumbnailCacheDir: appConfig.thumbnailCacheDir,
         requireLanToken: appConfig.requireLanToken,
         enableLightRootMode: appConfig.enableLightRootMode,
         enableIndexPersist: appConfig.enableIndexPersist,

@@ -3,11 +3,13 @@ import fs from "fs/promises";
 import path from "path";
 import { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { AppConfig, isOriginAllowed } from "./config";
-import { FolderMode, MediaScanner } from "./scanner";
+import { FolderMediaFilter, FolderMode, MediaScanner } from "./scanner";
+import { VideoThumbnailCache } from "./video_thumbnail_cache";
 
 export async function registerRoutes(
   fastify: FastifyInstance,
   scanner: MediaScanner,
+  thumbnailCache: VideoThumbnailCache,
   appConfig: AppConfig
 ) {
   const diagnosticsDir = process.env.TMV_DIAGNOSTICS_DIR?.trim() || "";
@@ -42,16 +44,19 @@ export async function registerRoutes(
       cursor?: string;
       limit?: string;
       mode?: string;
+      kind?: string;
     };
     const targetPath = query.path ?? "";
     const limit = query.limit ? Number(query.limit) : undefined;
 
     try {
       const mode = parseMode(query.mode, targetPath, appConfig.enableLightRootMode);
+      const mediaFilter = parseMediaFilter(query.kind);
       return await scanner.getFolder(targetPath, {
         cursor: query.cursor,
         limit,
         mode,
+        mediaFilter,
       });
     } catch (error) {
       const message =
@@ -145,7 +150,7 @@ export async function registerRoutes(
     }
 
     try {
-      const { absolutePath } = scanner.resolveMediaFile(decodedPath);
+      const { absolutePath } = await scanner.resolveMediaFile(decodedPath);
       const stats = await fs.stat(absolutePath);
       if (!stats.isFile()) {
         reply.status(404);
@@ -156,7 +161,8 @@ export async function registerRoutes(
       const contentType = contentTypeByExt(ext);
       const range = typeof request.headers.range === "string" ? request.headers.range : undefined;
 
-      reply.header("Cache-Control", "public, max-age=86400");
+      const isVideoContent = contentType.startsWith("video/");
+      reply.header("Cache-Control", isVideoContent ? "no-store" : "public, max-age=86400");
       reply.header("Accept-Ranges", "bytes");
       reply.header("Content-Type", contentType);
 
@@ -184,6 +190,59 @@ export async function registerRoutes(
         reply.status(404);
       } else {
         reply.status(404);
+      }
+      return { error: message };
+    }
+  });
+
+  fastify.get("/thumb/*", async (request, reply) => {
+    if (!(await guardRequest(request, reply))) return;
+    const wildcardPath = (request.params as { "*": string })["*"] ?? "";
+    let decodedPath: string;
+    try {
+      decodedPath = decodeURIComponent(wildcardPath);
+    } catch {
+      reply.status(400);
+      return { error: "Invalid thumbnail path encoding" };
+    }
+
+    try {
+      const { safeRelativePath, absolutePath, kind } = await scanner.resolveMediaFile(
+        decodedPath
+      );
+      const stats = await fs.stat(absolutePath);
+      if (!stats.isFile()) {
+        reply.status(404);
+        return { error: "Media file not found" };
+      }
+
+      const thumbnailPath = await thumbnailCache.getThumbnail(
+        safeRelativePath,
+        absolutePath,
+        stats.mtimeMs,
+        kind
+      );
+      const thumbnailStats = await fs.stat(thumbnailPath);
+
+      reply.header("Cache-Control", "public, max-age=31536000, immutable");
+      reply.header("Content-Type", "image/jpeg");
+      reply.header("Content-Length", thumbnailStats.size);
+      return reply.send(createReadStream(thumbnailPath));
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unable to build thumbnail";
+      if (
+        message.includes("Unsupported media extension")
+      ) {
+        reply.status(403);
+      } else if (
+        message.includes("Missing media file path") ||
+        message.includes("Media file not found") ||
+        message.includes("escapes media root")
+      ) {
+        reply.status(404);
+      } else {
+        reply.status(500);
       }
       return { error: message };
     }
@@ -262,6 +321,14 @@ const parseMode = (
     return input;
   }
   throw new Error("mode must be light or full");
+};
+
+const parseMediaFilter = (input: string | undefined): FolderMediaFilter | undefined => {
+  if (!input) return undefined;
+  if (input === "image" || input === "video") {
+    return input;
+  }
+  throw new Error("kind must be image or video");
 };
 
 type PreviewBatchLogEntry = {

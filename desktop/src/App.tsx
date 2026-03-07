@@ -4,16 +4,21 @@ import { listen } from "@tauri-apps/api/event";
 import "./App.css";
 
 type RuntimeStatus = "starting" | "running" | "stopped" | "error";
+type ViewerAccessMode = "local" | "lan";
+const BASIC_AUTH_USERNAME = "tmv";
 
 type Settings = {
   homeDir: string;
   preferredViewerPort: number;
   launchAtLogin: boolean;
   startHidden: boolean;
+  viewerAccessMode: ViewerAccessMode;
+  lanPassword: string;
 };
 
 type Runtime = {
   status: RuntimeStatus;
+  backendImplementation: string;
   viewerPort: number;
   apiPort: number;
   viewerUrl: string;
@@ -57,22 +62,31 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [formDirty, setFormDirty] = useState(false);
   const [form, setForm] = useState<Settings>({
     homeDir: "/Users/tiny/X",
     preferredViewerPort: 4300,
     launchAtLogin: true,
     startHidden: true,
+    viewerAccessMode: "local",
+    lanPassword: "",
   });
+
+  const applyRemoteState = useCallback((next: AppState, nextDiagnostics: DiagnosticsState | null) => {
+    setState(next);
+    setDiagnostics(nextDiagnostics);
+    if (!formDirty) {
+      setForm(next.settings);
+    }
+  }, [formDirty]);
 
   const refreshState = useCallback(async () => {
     const [next, nextDiagnostics] = await Promise.all([
       invoke<AppState>("get_app_state"),
       invoke<DiagnosticsState>("get_diagnostics_state").catch(() => null),
     ]);
-    setState(next);
-    setForm(next.settings);
-    setDiagnostics(nextDiagnostics);
-  }, []);
+    applyRemoteState(next, nextDiagnostics);
+  }, [applyRemoteState]);
 
   useEffect(() => {
     const init = async () => {
@@ -90,12 +104,10 @@ function App() {
     init();
 
     const unlistenPromise = listen<AppState>("app-state-updated", (event) => {
-      setState(event.payload);
-      setForm(event.payload.settings);
       invoke<DiagnosticsState>("get_diagnostics_state")
-        .then((payload) => setDiagnostics(payload))
+        .then((payload) => applyRemoteState(event.payload, payload))
         .catch(() => {
-          // no-op
+          applyRemoteState(event.payload, null);
         });
     });
 
@@ -117,6 +129,13 @@ function App() {
     if (!state) return "未知";
     return statusTextMap[state.runtime.status] ?? state.runtime.status;
   }, [state]);
+  const lanModeEnabled = form.viewerAccessMode === "lan";
+  const lanPasswordTooShort = lanModeEnabled && form.lanPassword.trim().length < 8;
+  const canSave = !saving && !lanPasswordTooShort;
+  const pendingModeChanged = state ? form.viewerAccessMode !== state.settings.viewerAccessMode : false;
+  const pendingViewerPortChanged = state
+    ? form.preferredViewerPort !== state.settings.preferredViewerPort
+    : false;
 
   const saveSettings = useCallback(async () => {
     try {
@@ -126,6 +145,7 @@ function App() {
       const next = await invoke<AppState>("save_settings", { input: form });
       setState(next);
       setForm(next.settings);
+      setFormDirty(false);
       setMessage("设置已保存并重启服务");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -141,19 +161,22 @@ function App() {
       setMessage(null);
       const next = await invoke<AppState>("restart_services");
       setState(next);
-      setForm(next.settings);
+      if (!formDirty) {
+        setForm(next.settings);
+      }
       setMessage("服务已重启");
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setError(`重启失败: ${detail}`);
     }
-  }, []);
+  }, [formDirty]);
 
   const pickHomeDirectory = useCallback(async () => {
     try {
       setError(null);
       const picked = await invoke<string | null>("pick_home_directory");
       if (!picked) return;
+      setFormDirty(true);
       setForm((prev) => ({ ...prev, homeDir: picked }));
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
@@ -204,9 +227,10 @@ function App() {
             <input
               id="homeDir"
               value={form.homeDir}
-              onChange={(event) =>
-                setForm((prev) => ({ ...prev, homeDir: event.target.value }))
-              }
+              onChange={(event) => {
+                setFormDirty(true);
+                setForm((prev) => ({ ...prev, homeDir: event.target.value }));
+              }}
               placeholder="/Users/tiny/X"
             />
             <button type="button" onClick={pickHomeDirectory}>
@@ -223,22 +247,81 @@ function App() {
             min={1}
             max={65535}
             value={form.preferredViewerPort}
-            onChange={(event) =>
+            onChange={(event) => {
+              setFormDirty(true);
               setForm((prev) => ({
                 ...prev,
                 preferredViewerPort: Number(event.target.value || 0),
-              }))
-            }
+              }));
+            }}
           />
         </div>
+
+        <div className="row">
+          <label>访问模式</label>
+          <div className="network-mode-group">
+            <label className={`mode-option ${form.viewerAccessMode === "local" ? "selected" : ""}`}>
+              <input
+                type="radio"
+                name="viewerAccessMode"
+                checked={form.viewerAccessMode === "local"}
+                onChange={() => {
+                  setFormDirty(true);
+                  setForm((prev) => ({ ...prev, viewerAccessMode: "local" }));
+                }}
+              />
+              <span>仅本机</span>
+            </label>
+            <label className={`mode-option ${form.viewerAccessMode === "lan" ? "selected" : ""}`}>
+              <input
+                type="radio"
+                name="viewerAccessMode"
+                checked={form.viewerAccessMode === "lan"}
+                onChange={() => {
+                  setFormDirty(true);
+                  setForm((prev) => ({ ...prev, viewerAccessMode: "lan" }));
+                }}
+              />
+              <span>局域网分享</span>
+            </label>
+          </div>
+          <p className="hint">
+            仅本机会绑定 <code>127.0.0.1</code>；局域网分享会开放 LAN 地址并启用 Basic
+            Auth。运行状态区域显示的是已应用配置，不是未保存草稿。
+          </p>
+        </div>
+
+        {lanModeEnabled ? (
+          <div className="row">
+            <label htmlFor="lanPassword">LAN 访问密码</label>
+            <input
+              id="lanPassword"
+              type="password"
+              autoComplete="new-password"
+              value={form.lanPassword}
+              onChange={(event) => {
+                setFormDirty(true);
+                setForm((prev) => ({ ...prev, lanPassword: event.target.value }));
+              }}
+              placeholder="至少 8 个字符"
+            />
+            <p className="hint">
+              用户名固定为 <code>{BASIC_AUTH_USERNAME}</code>。
+            </p>
+            {lanPasswordTooShort ? (
+              <p className="error">局域网分享需要至少 8 位密码，保存后才会切换运行状态。</p>
+            ) : null}
+          </div>
+        ) : null}
 
         <label className="checkbox-row">
           <input
             type="checkbox"
             checked={form.launchAtLogin}
-            onChange={(event) =>
-              setForm((prev) => ({ ...prev, launchAtLogin: event.target.checked }))
-            }
+            onChange={(event) => {
+              setFormDirty(true);
+              setForm((prev) => ({ ...prev, launchAtLogin: event.target.checked }));
+            }}
           />
           开机自动启动
         </label>
@@ -247,37 +330,65 @@ function App() {
           <input
             type="checkbox"
             checked={form.startHidden}
-            onChange={(event) =>
-              setForm((prev) => ({ ...prev, startHidden: event.target.checked }))
-            }
+            onChange={(event) => {
+              setFormDirty(true);
+              setForm((prev) => ({ ...prev, startHidden: event.target.checked }));
+            }}
           />
           启动后隐藏到菜单栏
         </label>
 
         <div className="actions">
-          <button type="button" onClick={saveSettings} disabled={saving}>
+          <button type="button" onClick={saveSettings} disabled={!canSave}>
             {saving ? "保存中..." : "保存并应用"}
           </button>
-          <button type="button" className="secondary" onClick={restartService}>
+          <button type="button" className="secondary" onClick={restartService} disabled={formDirty}>
             重启服务
           </button>
           <button type="button" className="secondary" onClick={openViewer}>
             打开 Viewer
           </button>
         </div>
+        {formDirty ? (
+          <p className="hint">
+            当前表单有未保存改动。点击“保存并应用”后，下面的运行状态才会更新。
+          </p>
+        ) : null}
       </section>
 
       <section className="panel runtime">
         <h2>运行状态</h2>
+        {formDirty ? (
+          <p className="hint">
+            已应用配置仍然是当前运行状态。
+            {pendingModeChanged
+              ? ` 待应用访问模式: ${form.viewerAccessMode === "lan" ? "局域网分享" : "仅本机"}。`
+              : ""}
+            {pendingViewerPortChanged ? ` 待应用 Viewer 端口: ${form.preferredViewerPort}。` : ""}
+          </p>
+        ) : null}
+        <p>
+          当前后端: <code>{state?.runtime.backendImplementation || "-"}</code>
+        </p>
+        <p>
+          访问模式:{" "}
+          <code>{state?.settings.viewerAccessMode === "lan" ? "局域网分享" : "仅本机"}</code>
+        </p>
         <p>当前 Viewer 端口: {state?.runtime.viewerPort ?? "-"}</p>
         <p>当前 API 端口: {state?.runtime.apiPort ?? "-"}</p>
         <p>
-          局域网 URL: {state?.runtime.viewerUrl ? <code>{state.runtime.viewerUrl}</code> : "-"}
+          局域网 URL:{" "}
+          {state?.runtime.viewerUrl ? <code>{state.runtime.viewerUrl}</code> : "未启用"}
         </p>
         <p>
           本机 URL:{" "}
           {state?.runtime.viewerLocalUrl ? <code>{state.runtime.viewerLocalUrl}</code> : "-"}
         </p>
+        {state?.settings.viewerAccessMode === "lan" ? (
+          <p>
+            LAN 用户名: <code>{BASIC_AUTH_USERNAME}</code>
+          </p>
+        ) : null}
         <p>
           诊断事件: <code>{diagnostics?.events.length ?? 0}</code>
         </p>

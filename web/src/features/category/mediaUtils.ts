@@ -1,6 +1,20 @@
 import type { MediaItem } from "../../types";
 
+const mediaTimestampCache = new Map<
+  string,
+  {
+    name: string;
+    modified: number;
+    value: number;
+  }
+>();
+
 export const getMediaTimestamp = (item: MediaItem) => {
+  const cached = mediaTimestampCache.get(item.path);
+  if (cached && cached.name === item.name && cached.modified === item.modified) {
+    return cached.value;
+  }
+
   const match = item.name.match(/_(\d{8})_(\d{6})/);
   if (match) {
     const [date, time] = [match[1], match[2]];
@@ -10,8 +24,19 @@ export const getMediaTimestamp = (item: MediaItem) => {
     const hour = Number(time.slice(0, 2));
     const minute = Number(time.slice(2, 4));
     const second = Number(time.slice(4, 6));
-    return new Date(year, month, day, hour, minute, second).getTime();
+    const value = new Date(year, month, day, hour, minute, second).getTime();
+    mediaTimestampCache.set(item.path, {
+      name: item.name,
+      modified: item.modified,
+      value,
+    });
+    return value;
   }
+  mediaTimestampCache.set(item.path, {
+    name: item.name,
+    modified: item.modified,
+    value: item.modified,
+  });
   return item.modified;
 };
 
@@ -30,11 +55,18 @@ export const sortMediaByTime = (
   items: MediaItem[],
   direction: "asc" | "desc"
 ) => {
-  return [...items].sort((a, b) =>
-    direction === "asc"
-      ? getMediaTimestamp(a) - getMediaTimestamp(b)
-      : getMediaTimestamp(b) - getMediaTimestamp(a)
+  if (items.length < 2) {
+    return items.slice();
+  }
+
+  const decorated = items.map((item) => ({
+    item,
+    timestamp: getMediaTimestamp(item),
+  }));
+  decorated.sort((a, b) =>
+    direction === "asc" ? a.timestamp - b.timestamp : b.timestamp - a.timestamp
   );
+  return decorated.map(({ item }) => item);
 };
 
 export const mergeMediaByPath = (existing: MediaItem[], incoming: MediaItem[]) => {
@@ -46,5 +78,5 @@ export const mergeMediaByPath = (existing: MediaItem[], incoming: MediaItem[]) =
       seen.add(item.path);
     }
   }
-  return merged.sort((a, b) => b.modified - a.modified);
+  return merged;
 };

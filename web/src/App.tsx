@@ -1,4 +1,12 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import "./App.css";
 import "./features/effects/effects.css";
 import type { MediaItem } from "./types";
@@ -21,6 +29,7 @@ const HEART_PULSE_OFFSET_Y = 0;
 const APP_VERSION = import.meta.env.VITE_TMV_APP_VERSION ?? "0.1.0";
 const APP_SHORT_COMMIT = import.meta.env.VITE_TMV_SHORT_COMMIT ?? "dev";
 const APP_BUILD_TIME = import.meta.env.VITE_TMV_BUILD_TIME ?? "unknown";
+const EMPTY_MEDIA: MediaItem[] = [];
 
 function App() {
   const [search, setSearch] = useState("");
@@ -30,10 +39,12 @@ function App() {
   const [mediaSort, setMediaSort] = useState<"asc" | "desc">("desc");
   const [heartHue, setHeartHue] = useState(0);
   const [visibleCards, setVisibleCards] = useState(0);
+  const [refreshing, setRefreshing] = useState(false);
 
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
+  const authRedirectedRef = useRef(false);
 
-  const { folder, setFolder, loading, error } = useRootFolder();
+  const { folder, setFolder, loading, error, loadRoot } = useRootFolder();
   const { enqueueRootPreviewPaths, resetRootPreviewQueue } = usePreviewBackfillQueue({
     folder,
     setFolder,
@@ -48,8 +59,10 @@ function App() {
     categoryError,
     setCategoryVisibleCount,
     handleSelectCategory,
+    refreshCategory,
+    invalidateCategoryCache,
     loadMoreCategory,
-  } = useCategoryMedia({ rootFolder: folder });
+  } = useCategoryMedia({ rootFolder: folder, mediaFilter });
   const {
     theme,
     setTheme,
@@ -79,11 +92,14 @@ function App() {
       })
       .sort((a, b) => (sortMode === "name" ? a.name.localeCompare(b.name) : b.modified - a.modified));
   }, [folder, mediaFilter, search, sortMode]);
+  const deferredCategoryMediaSource = useDeferredValue(categoryPreview?.media ?? EMPTY_MEDIA);
   const filteredCategoryMedia = useMemo(() => {
-    const source = categoryPreview?.media ?? [];
-    const filtered = filterMediaByKind(source, mediaFilter);
+    const filtered = filterMediaByKind(deferredCategoryMediaSource, mediaFilter);
+    if (mediaSort === "desc") {
+      return filtered;
+    }
     return sortMediaByTime(filtered, mediaSort);
-  }, [categoryPreview, mediaFilter, mediaSort]);
+  }, [deferredCategoryMediaSource, mediaFilter, mediaSort]);
   const visibleCategoryMedia = useMemo(
     () => filteredCategoryMedia.slice(0, categoryVisibleCount),
     [categoryVisibleCount, filteredCategoryMedia]
@@ -117,7 +133,11 @@ function App() {
   );
   const onReachEnd = useCallback(() => {
     if (visibleCategoryMedia.length < filteredCategoryMedia.length) {
-      setCategoryVisibleCount((previous) => Math.min(previous + 32, filteredCategoryMedia.length));
+      startTransition(() => {
+        setCategoryVisibleCount((previous) =>
+          Math.min(previous + 32, filteredCategoryMedia.length)
+        );
+      });
       return;
     }
     if (categoryHasMore && !categoryLoadingMore) {
@@ -131,6 +151,33 @@ function App() {
     setCategoryVisibleCount,
     visibleCategoryMedia.length,
   ]);
+  const onRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+
+    const preferredPath = categoryPath;
+    resetRootPreviewQueue();
+    invalidateCategoryCache();
+
+    try {
+      const nextRoot = await loadRoot();
+      if (!nextRoot) return;
+      await refreshCategory(nextRoot, preferredPath);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [
+    categoryPath,
+    invalidateCategoryCache,
+    loadRoot,
+    refreshCategory,
+    refreshing,
+    resetRootPreviewQueue,
+  ]);
+  const onReauthenticate = useCallback(() => {
+    const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    window.location.assign(`/__tmv/login?returnTo=${encodeURIComponent(returnTo || "/")}`);
+  }, []);
 
   const scrollTrackingKey = `${categoryPreview?.folder.path ?? "-"}|${mediaFilter}|${mediaSort}|${sortMode}`;
   const { showScrollTop, heartCursorVisible, heartCursorRef, hoveredCardRef, scrollToTop } =
@@ -147,6 +194,52 @@ function App() {
     media: filteredCategoryMedia,
     onSelect: setSelected,
   });
+
+  useEffect(() => {
+    if (!categoryPath) return;
+    if (!filteredAccounts.length) return;
+    if (filteredAccounts.some((item) => item.path === categoryPath)) return;
+    void handleSelectCategory(filteredAccounts[0].path);
+  }, [categoryPath, filteredAccounts, handleSelectCategory]);
+
+  const requiresAuth = error === "Unauthorized" || categoryError === "Unauthorized";
+  const toolbarError = requiresAuth ? "认证已失效，正在跳转登录..." : error;
+
+  useEffect(() => {
+    if (!requiresAuth) {
+      authRedirectedRef.current = false;
+      return;
+    }
+    if (authRedirectedRef.current) return;
+    authRedirectedRef.current = true;
+    const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    window.location.replace(`/__tmv/login?returnTo=${encodeURIComponent(returnTo || "/")}`);
+  }, [requiresAuth]);
+
+  useEffect(() => {
+    if (!selected) return;
+    if (!categoryPreview) {
+      if (!categoryPath) {
+        setSelected(null);
+      }
+      return;
+    }
+
+    const updated = categoryPreview.media.find((item) => item.path === selected.path);
+    if (!updated) {
+      setSelected(null);
+      return;
+    }
+
+    if (
+      updated.modified !== selected.modified ||
+      updated.size !== selected.size ||
+      updated.url !== selected.url ||
+      updated.name !== selected.name
+    ) {
+      setSelected(updated);
+    }
+  }, [categoryPath, categoryPreview, selected]);
 
   return (
     <div className="page">
@@ -182,7 +275,11 @@ function App() {
         onToggleRenderer={toggleRenderer}
         perfNotice={perfNotice}
         loading={loading}
-        error={error}
+        error={toolbarError}
+        requiresAuth={requiresAuth}
+        onReauthenticate={onReauthenticate}
+        refreshing={refreshing}
+        onRefresh={onRefresh}
         sortMode={sortMode}
         setSortMode={setSortMode}
         search={search}
@@ -204,7 +301,7 @@ function App() {
         onVisibleCategoryPathsChange={onVisibleCategoryPathsChange}
         previewScrollRef={previewScrollRef}
         categoryLoading={categoryLoading}
-        categoryError={categoryError}
+        categoryError={requiresAuth ? "访问已失效，正在跳转登录..." : categoryError}
         categoryPreview={categoryPreview}
         visibleCategoryMedia={visibleCategoryMedia}
         filteredCategoryMediaCount={filteredCategoryMedia.length}
