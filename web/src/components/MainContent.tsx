@@ -1,4 +1,4 @@
-import type { RefObject } from "react";
+import { memo, type RefObject } from "react";
 import type { FolderPayload, FolderPreview, MediaItem } from "../types";
 import { CategoryList } from "./CategoryList";
 import { MediaGrid } from "./MediaGrid";
@@ -8,6 +8,7 @@ interface MainContentProps {
   categoryPath: string | null;
   loading: boolean;
   onSelectCategory: (path: string) => void;
+  onToggleFavorite: (path: string, favorite: boolean) => void;
   onVisibleCategoryPathsChange: (paths: string[]) => void;
   previewScrollRef: RefObject<HTMLDivElement | null>;
   categoryLoading: boolean;
@@ -23,11 +24,12 @@ interface MainContentProps {
   onVisibleCardsChange: (count: number) => void;
 }
 
-export function MainContent({
+export const MainContent = memo(function MainContent({
   accounts,
   categoryPath,
   loading,
   onSelectCategory,
+  onToggleFavorite,
   onVisibleCategoryPathsChange,
   previewScrollRef,
   categoryLoading,
@@ -50,6 +52,7 @@ export function MainContent({
           selectedPath={categoryPath}
           loading={loading}
           onSelect={onSelectCategory}
+          onToggleFavorite={onToggleFavorite}
           onVisiblePathsChange={onVisibleCategoryPathsChange}
         />
 
@@ -76,4 +79,4 @@ export function MainContent({
       </div>
     </section>
   );
-}
+});

@@ -2,7 +2,6 @@ mod commands;
 mod config;
 mod diagnostics;
 mod service_manager;
-mod viewer_gateway;
 
 use crate::{
     config::{AppStatePayload, RuntimeState, Settings},

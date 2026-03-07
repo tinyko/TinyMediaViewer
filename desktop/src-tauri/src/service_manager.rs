@@ -1,10 +1,9 @@
 use crate::{
     config::{RuntimeState, Settings, ViewerAccessMode},
     diagnostics::DiagnosticsStore,
-    viewer_gateway::{self, GatewayHandle},
 };
 use std::{
-    env, fs,
+    fs,
     fs::OpenOptions,
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, UdpSocket},
     os::unix::fs::PermissionsExt,
@@ -18,18 +17,10 @@ use tauri::{path::BaseDirectory, AppHandle, Manager};
 use tokio::process::Child;
 
 const RUST_BACKEND_NAME: &str = "tmv-backend-app-aarch64-apple-darwin";
-const NODE_BACKEND_NAME: &str = "media-viewer-server-aarch64-apple-darwin";
 const HEALTH_CHECK_RETRIES: usize = 40;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackendImplementation {
-    Node,
-    Rust,
-}
 
 pub struct ServiceManager {
     server_child: Option<Child>,
-    gateway_handle: Option<GatewayHandle>,
     diagnostics: Arc<DiagnosticsStore>,
 }
 
@@ -37,7 +28,6 @@ impl ServiceManager {
     pub fn new(diagnostics: Arc<DiagnosticsStore>) -> Self {
         Self {
             server_child: None,
-            gateway_handle: None,
             diagnostics,
         }
     }
@@ -48,18 +38,10 @@ impl ServiceManager {
         settings: &Settings,
     ) -> Result<RuntimeState, String> {
         self.stop().await;
-
-        match selected_backend_impl() {
-            BackendImplementation::Rust => self.restart_rust_backend(app, settings).await,
-            BackendImplementation::Node => self.restart_node_backend(app, settings).await,
-        }
+        self.restart_rust_backend(app, settings).await
     }
 
     pub async fn stop(&mut self) {
-        if let Some(gateway_handle) = self.gateway_handle.take() {
-            gateway_handle.stop().await;
-        }
-
         if let Some(mut child) = self.server_child.take() {
             let _ = child.start_kill();
             let _ = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
@@ -129,78 +111,12 @@ impl ServiceManager {
             ViewerAccessMode::Local => None,
         };
 
-        Ok(RuntimeState::running("rust", viewer_port, viewer_port, viewer_url))
-    }
-
-    async fn restart_node_backend(
-        &mut self,
-        app: &AppHandle,
-        settings: &Settings,
-    ) -> Result<RuntimeState, String> {
-        let viewer_port = find_available_port(settings.preferred_viewer_port)?;
-        let api_port = find_available_port(viewer_port.saturating_add(1).max(1))?;
-        let backend_path = resolve_node_backend_path(app)?;
-        ensure_executable(&backend_path)?;
-        let viewer_dir = resolve_viewer_assets_path(app)?;
-        let app_data_dir = app
-            .path()
-            .app_data_dir()
-            .map_err(|error| format!("Failed to resolve app data dir: {error}"))?;
-        let diagnostics_dir = self.diagnostics.diagnostics_dir();
-        let stdout_log = open_sidecar_log(&diagnostics_dir, "node-backend.stdout.log")?;
-        let stderr_log = open_sidecar_log(&diagnostics_dir, "node-backend.stderr.log")?;
-        let access_token = build_runtime_token();
-
-        let child = tokio::process::Command::new(&backend_path)
-            .env("PORT", api_port.to_string())
-            .env("SERVER_HOST", "127.0.0.1")
-            .env("MEDIA_ROOT", &settings.home_dir)
-            .env("REQUIRE_LAN_TOKEN", "true")
-            .env("MEDIA_ACCESS_TOKEN", &access_token)
-            .env(
-                "CORS_ALLOWED_ORIGINS",
-                format!("http://127.0.0.1:{viewer_port}"),
-            )
-            .env("INDEX_DIR", app_data_dir.join("index"))
-            .env("THUMBNAIL_CACHE_DIR", app_data_dir.join("thumbnails"))
-            .env("TMV_DIAGNOSTICS_DIR", &diagnostics_dir)
-            .kill_on_drop(true)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout_log))
-            .stderr(Stdio::from(stderr_log))
-            .spawn()
-            .map_err(|error| {
-                format!(
-                    "Failed to spawn Node backend {}: {error}",
-                    backend_path.display()
-                )
-            })?;
-
-        self.server_child = Some(child);
-        self.wait_for_server_health(&format!("http://127.0.0.1:{api_port}/health"))
-            .await?;
-
-        let gateway_handle = viewer_gateway::start_gateway(
-            viewer_dir,
+        Ok(RuntimeState::running(
+            "rust",
             viewer_port,
-            api_port,
-            access_token,
-            settings.viewer_access_mode.clone(),
-            settings.lan_password.clone(),
-            self.diagnostics.clone(),
-        )
-        .await?;
-        self.gateway_handle = Some(gateway_handle);
-
-        let viewer_url = match settings.viewer_access_mode {
-            ViewerAccessMode::Lan => {
-                let lan_ip = detect_lan_ipv4();
-                Some(format!("http://{lan_ip}:{viewer_port}"))
-            }
-            ViewerAccessMode::Local => None,
-        };
-
-        Ok(RuntimeState::running("node", viewer_port, api_port, viewer_url))
+            viewer_port,
+            viewer_url,
+        ))
     }
 
     async fn wait_for_server_health(&mut self, url: &str) -> Result<(), String> {
@@ -230,26 +146,6 @@ impl ServiceManager {
 
         Err("Timed out waiting for backend health check".to_string())
     }
-}
-
-fn selected_backend_impl() -> BackendImplementation {
-    match env::var("TMV_DESKTOP_BACKEND_IMPL")
-        .unwrap_or_else(|_| "rust".to_string())
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "rust" => BackendImplementation::Rust,
-        _ => BackendImplementation::Node,
-    }
-}
-
-fn build_runtime_token() -> String {
-    format!(
-        "tmv-{:x}-{:x}",
-        build_tmp_suffix(),
-        u128::from(std::process::id())
-    )
 }
 
 fn find_available_port(preferred_port: u16) -> Result<u16, String> {
@@ -342,14 +238,6 @@ fn resolve_rust_backend_path(app: &AppHandle) -> Result<PathBuf, String> {
             "backend-rs/target/debug/tmv-backend-app",
             "backend-rs/target/release/tmv-backend-app",
         ],
-    )
-}
-
-fn resolve_node_backend_path(app: &AppHandle) -> Result<PathBuf, String> {
-    resolve_backend_path(
-        app,
-        NODE_BACKEND_NAME,
-        &["desktop/src-tauri/binaries/media-viewer-server-aarch64-apple-darwin"],
     )
 }
 

@@ -183,7 +183,11 @@ pub fn save_settings(path: &Path, settings: &Settings) -> Result<(), String> {
     }
 
     let db_path = settings_db_path_from_settings_path(path)?;
-    save_access_settings(&db_path, &settings.viewer_access_mode, &settings.lan_password)?;
+    save_access_settings(
+        &db_path,
+        &settings.viewer_access_mode,
+        &settings.lan_password,
+    )?;
 
     let mut json_settings = settings.clone();
     json_settings.viewer_access_mode = ViewerAccessMode::Local;
@@ -285,7 +289,10 @@ impl ViewerAccessMode {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_settings, save_settings, settings_db_path_from_settings_path, Settings, ViewerAccessMode};
+    use super::{
+        load_settings, save_settings, settings_db_path_from_settings_path, Settings,
+        ViewerAccessMode,
+    };
     use std::fs;
     use tempfile::tempdir;
 

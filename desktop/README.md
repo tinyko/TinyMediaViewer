@@ -1,7 +1,17 @@
-# Tauri + React + Typescript
+# Desktop Shell
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Tauri tray application for TinyMediaViewer.
 
-## Recommended IDE Setup
+## Responsibilities
+- Launch the bundled Rust sidecar `tmv-backend-app`
+- Persist local settings and diagnostics
+- Open the local viewer URL and expose runtime state to the settings UI
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## Packaging
+```bash
+npm install
+npm run prepare:bundle
+npm run build:dmg
+```
+
+`prepare:bundle` builds the Rust backend from `../backend-rs` and copies the release binary into `src-tauri/binaries/`.

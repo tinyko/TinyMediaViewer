@@ -4,6 +4,7 @@ import App from "./App";
 import {
   fetchFolder,
   fetchFolderPreviews,
+  postFolderFavorite,
   postPerfDiagnostics,
   postPreviewDiagnostics,
 } from "./api";
@@ -12,12 +13,14 @@ import type { FolderPayload } from "./types";
 vi.mock("./api", () => ({
   fetchFolder: vi.fn(),
   fetchFolderPreviews: vi.fn(),
+  postFolderFavorite: vi.fn(),
   postPreviewDiagnostics: vi.fn(),
   postPerfDiagnostics: vi.fn(),
 }));
 
 const mockedFetchFolder = vi.mocked(fetchFolder);
 const mockedFetchFolderPreviews = vi.mocked(fetchFolderPreviews);
+const mockedPostFolderFavorite = vi.mocked(postFolderFavorite);
 const mockedPostPreviewDiagnostics = vi.mocked(postPreviewDiagnostics);
 const mockedPostPerfDiagnostics = vi.mocked(postPerfDiagnostics);
 
@@ -43,6 +46,7 @@ const rootPayload = (): FolderPayload => ({
       previews: [],
       countsReady: true,
       previewReady: true,
+      favorite: false,
     },
     {
       name: "beta",
@@ -52,6 +56,7 @@ const rootPayload = (): FolderPayload => ({
       previews: [],
       countsReady: true,
       previewReady: true,
+      favorite: false,
     },
   ],
   media: [],
@@ -82,8 +87,10 @@ describe("App request race handling", () => {
   beforeEach(() => {
     mockedFetchFolder.mockReset();
     mockedFetchFolderPreviews.mockReset();
+    mockedPostFolderFavorite.mockReset();
     mockedPostPreviewDiagnostics.mockReset();
     mockedPostPerfDiagnostics.mockReset();
+    mockedPostFolderFavorite.mockResolvedValue({ path: "alpha", favorite: true });
     mockedPostPreviewDiagnostics.mockResolvedValue();
     mockedPostPerfDiagnostics.mockResolvedValue();
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
@@ -108,7 +115,7 @@ describe("App request race handling", () => {
 
     render(<App />);
 
-    const betaButton = await screen.findByRole("button", { name: /beta/i });
+    const betaButton = await screen.findByRole("button", { name: /^beta/i });
     await userEvent.click(betaButton);
 
     betaDeferred.resolve(categoryPayload("beta", "B_photo.jpg"));

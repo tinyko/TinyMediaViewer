@@ -5,6 +5,7 @@ import App from "./App";
 import {
   fetchFolder,
   fetchFolderPreviews,
+  postFolderFavorite,
   postPerfDiagnostics,
   postPreviewDiagnostics,
 } from "./api";
@@ -17,12 +18,14 @@ import type {
 vi.mock("./api", () => ({
   fetchFolder: vi.fn(),
   fetchFolderPreviews: vi.fn(),
+  postFolderFavorite: vi.fn(),
   postPreviewDiagnostics: vi.fn(),
   postPerfDiagnostics: vi.fn(),
 }));
 
 const mockedFetchFolder = vi.mocked(fetchFolder);
 const mockedFetchFolderPreviews = vi.mocked(fetchFolderPreviews);
+const mockedPostFolderFavorite = vi.mocked(postFolderFavorite);
 const mockedPostPreviewDiagnostics = vi.mocked(postPreviewDiagnostics);
 const mockedPostPerfDiagnostics = vi.mocked(postPerfDiagnostics);
 
@@ -57,6 +60,7 @@ const makeLightRootPayload = (): FolderPayload => ({
       previews: [],
       countsReady: false,
       previewReady: false,
+      favorite: false,
       approximate: true,
     },
     {
@@ -67,6 +71,7 @@ const makeLightRootPayload = (): FolderPayload => ({
       previews: [],
       countsReady: false,
       previewReady: false,
+      favorite: false,
       approximate: true,
     },
   ],
@@ -105,8 +110,10 @@ describe("App root light mode + preview backfill", () => {
   beforeEach(() => {
     mockedFetchFolder.mockReset();
     mockedFetchFolderPreviews.mockReset();
+    mockedPostFolderFavorite.mockReset();
     mockedPostPreviewDiagnostics.mockReset();
     mockedPostPerfDiagnostics.mockReset();
+    mockedPostFolderFavorite.mockResolvedValue({ path: "alpha", favorite: true });
     mockedPostPreviewDiagnostics.mockResolvedValue();
     mockedPostPerfDiagnostics.mockResolvedValue();
   });
@@ -122,6 +129,7 @@ describe("App root light mode + preview backfill", () => {
           previews: [makeMedia("A.jpg", "image")],
           countsReady: true,
           previewReady: true,
+          favorite: false,
         },
         {
           name: "beta",
@@ -131,6 +139,7 @@ describe("App root light mode + preview backfill", () => {
           previews: [makeMedia("B.gif", "gif"), makeMedia("B.mp4", "video")],
           countsReady: true,
           previewReady: true,
+          favorite: false,
         },
       ],
     };
@@ -146,8 +155,8 @@ describe("App root light mode + preview backfill", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: /alpha/i })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /beta/i })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^alpha/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^beta/i })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(mockedFetchFolderPreviews).toHaveBeenCalled();
@@ -176,11 +185,11 @@ describe("App root light mode + preview backfill", () => {
 
     render(<App />);
 
-    const alphaButton = await screen.findByRole("button", { name: /alpha/i });
+    const alphaButton = await screen.findByRole("button", { name: /^alpha/i });
     expect(alphaButton).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "视频" }));
-    expect(screen.getByRole("button", { name: /alpha/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^alpha/i })).toBeInTheDocument();
 
     await waitFor(() => {
       expect(mockedFetchFolderPreviews).toHaveBeenCalled();
@@ -196,6 +205,7 @@ describe("App root light mode + preview backfill", () => {
           previews: [makeMedia("A.jpg", "image")],
           countsReady: true,
           previewReady: true,
+          favorite: false,
         },
       ],
     });
@@ -239,6 +249,7 @@ describe("App root light mode + preview backfill", () => {
           previews: manyMedia.slice(0, 2),
           countsReady: true,
           previewReady: true,
+          favorite: false,
         },
       ],
     });
@@ -329,7 +340,7 @@ describe("App root light mode + preview backfill", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("button", { name: /alpha/i })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /^alpha/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /beta/i })).not.toBeInTheDocument();
     expect(await screen.findByText("cover.jpg")).toBeInTheDocument();
 
@@ -337,7 +348,7 @@ describe("App root light mode + preview backfill", () => {
 
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: /alpha/i })).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: /beta/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^beta/i })).toBeInTheDocument();
     });
     expect(await screen.findByText("clip.mp4")).toBeInTheDocument();
     expect(
@@ -349,7 +360,7 @@ describe("App root light mode + preview backfill", () => {
     await userEvent.click(screen.getByRole("button", { name: "图片" }));
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /alpha/i })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^alpha/i })).toBeInTheDocument();
       expect(screen.queryByRole("button", { name: /beta/i })).not.toBeInTheDocument();
     });
     expect(await screen.findByText("cover.jpg")).toBeInTheDocument();
@@ -423,6 +434,125 @@ describe("App root light mode + preview backfill", () => {
     expect(screen.queryByText("该账号暂无符合过滤条件的媒体")).not.toBeInTheDocument();
   });
 
+  it("shows only favorited accounts in favorite mode and switches the active category", async () => {
+    mockedPostFolderFavorite.mockImplementation(async ({ path, favorite }) => ({
+      path,
+      favorite,
+    }));
+    mockedFetchFolder.mockImplementation((targetPath = "") => {
+      if (targetPath === "") {
+        return Promise.resolve(
+          makeRootPayloadWithSubfolders([
+            {
+              ...makeLightRootPayload().subfolders[0],
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+            },
+            {
+              ...makeLightRootPayload().subfolders[1],
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+            },
+          ])
+        );
+      }
+
+      if (targetPath === "alpha") {
+        return Promise.resolve(
+          makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")])
+        );
+      }
+
+      return Promise.resolve(
+        makeCategoryPayloadWithMedia(targetPath, [makeMedia("B.jpg", "image")])
+      );
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    render(<App />);
+
+    expect(await screen.findByText("A.jpg")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "收藏 beta" }));
+
+    await waitFor(() => {
+      expect(mockedPostFolderFavorite).toHaveBeenCalledWith({
+        path: "beta",
+        favorite: true,
+      });
+    });
+
+    await userEvent.click(screen.getByRole("button", { name: "按收藏" }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /^alpha/i })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^beta/i })).toBeInTheDocument();
+    });
+    expect(await screen.findByText("B.jpg")).toBeInTheDocument();
+    expect(screen.queryByText("A.jpg")).not.toBeInTheDocument();
+  });
+
+  it("search switches to the matching account and clears the preview when no accounts match", async () => {
+    mockedFetchFolder.mockImplementation((targetPath = "") => {
+      if (targetPath === "") {
+        return Promise.resolve(
+          makeRootPayloadWithSubfolders([
+            {
+              ...makeLightRootPayload().subfolders[0],
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+            },
+            {
+              ...makeLightRootPayload().subfolders[1],
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+            },
+          ])
+        );
+      }
+
+      if (targetPath === "alpha") {
+        return Promise.resolve(
+          makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")])
+        );
+      }
+
+      return Promise.resolve(
+        makeCategoryPayloadWithMedia(targetPath, [makeMedia("B.jpg", "image")])
+      );
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    render(<App />);
+
+    expect(await screen.findByText("A.jpg")).toBeInTheDocument();
+
+    const searchInput = screen.getByPlaceholderText("筛选账号名称...");
+
+    await userEvent.type(searchInput, "beta");
+
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /^alpha/i })).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^beta/i })).toBeInTheDocument();
+    });
+    expect(await screen.findByText("B.jpg")).toBeInTheDocument();
+    expect(screen.queryByText("A.jpg")).not.toBeInTheDocument();
+
+    await userEvent.clear(searchInput);
+    await userEvent.type(searchInput, "missing");
+
+    await waitFor(() => {
+      expect(screen.getByText("没有匹配的账号")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /^beta/i })).not.toBeInTheDocument();
+      expect(screen.queryByText("B.jpg")).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText("该账号暂无符合过滤条件的媒体")).not.toBeInTheDocument();
+  });
+
   it("refreshes root and reloads the current category without mixing stale page data", async () => {
     const initialRoot = makeRootPayloadWithSubfolders([
       {
@@ -493,6 +623,7 @@ describe("App root light mode + preview backfill", () => {
         previews: [],
         countsReady: false,
         previewReady: false,
+        favorite: false,
         approximate: true,
       },
     ]);
@@ -518,14 +649,14 @@ describe("App root light mode + preview backfill", () => {
     render(<App />);
 
     await screen.findByText("A.jpg");
-    await userEvent.click(screen.getByRole("button", { name: /beta/i }));
+    await userEvent.click(screen.getByRole("button", { name: /^beta/i }));
     expect(await screen.findByText("B.jpg")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "刷新" }));
 
     expect(await screen.findByText("G.jpg")).toBeInTheDocument();
     expect(screen.queryByText("B.jpg")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /gamma/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^gamma/i })).toBeInTheDocument();
   });
 
   it("closes the preview modal when the refreshed first page no longer contains the selected media", async () => {
@@ -619,6 +750,7 @@ describe("App root light mode + preview backfill", () => {
           previews: [makeMedia("stale.jpg", "image")],
           countsReady: true,
           previewReady: true,
+          favorite: false,
         },
       ],
     });
@@ -637,6 +769,7 @@ describe("App root light mode + preview backfill", () => {
           previews: [makeMedia("fresh.jpg", "image")],
           countsReady: true,
           previewReady: true,
+          favorite: false,
         },
       ],
     });

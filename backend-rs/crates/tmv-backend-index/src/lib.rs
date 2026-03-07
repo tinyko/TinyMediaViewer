@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone)]
 pub struct IndexStore {
@@ -337,6 +337,59 @@ impl IndexStore {
         .context("join put runtime meta task")?
     }
 
+    pub async fn set_folder_favorite(&self, path: String, favorite: bool) -> Result<()> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = this.open()?;
+            if favorite {
+                conn.execute(
+                    "INSERT INTO folder_favorite (path, updated_at)
+                     VALUES (?1, unixepoch('now') * 1000)
+                     ON CONFLICT(path) DO UPDATE SET updated_at = excluded.updated_at",
+                    params![path],
+                )?;
+            } else {
+                conn.execute("DELETE FROM folder_favorite WHERE path = ?1", params![path])?;
+            }
+            Ok(())
+        })
+        .await
+        .context("join set folder favorite task")?
+    }
+
+    pub async fn is_folder_favorite(&self, path: String) -> Result<bool> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = this.open()?;
+            conn.query_row(
+                "SELECT 1 FROM folder_favorite WHERE path = ?1",
+                params![path],
+                |_row| Ok(true),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+            .map_err(Into::into)
+        })
+        .await
+        .context("join is folder favorite task")?
+    }
+
+    pub async fn load_all_folder_favorites(&self) -> Result<Vec<String>> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = this.open()?;
+            let mut stmt = conn
+                .prepare("SELECT path FROM folder_favorite ORDER BY updated_at DESC, path ASC")?;
+            let favorites = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(anyhow::Error::from)?;
+            Ok(favorites)
+        })
+        .await
+        .context("join load all folder favorites task")?
+    }
+
     fn init_schema(&self) -> Result<()> {
         let conn = self.open()?;
         conn.execute_batch(
@@ -388,6 +441,10 @@ impl IndexStore {
             CREATE TABLE IF NOT EXISTS runtime_meta (
               key TEXT PRIMARY KEY,
               value TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS folder_favorite (
+              path TEXT PRIMARY KEY,
               updated_at INTEGER NOT NULL
             );
             ",
@@ -553,5 +610,47 @@ mod tests {
             .await
             .expect("load preview");
         assert!(preview.is_some());
+    }
+
+    #[tokio::test]
+    async fn persists_folder_favorites() {
+        let temp = tempdir().expect("tempdir");
+        let store = IndexStore::new(temp.path()).await.expect("store");
+
+        store
+            .set_folder_favorite("alpha".to_string(), true)
+            .await
+            .expect("favorite alpha");
+        store
+            .set_folder_favorite("beta".to_string(), true)
+            .await
+            .expect("favorite beta");
+
+        let favorites = store
+            .load_all_folder_favorites()
+            .await
+            .expect("load favorites");
+        assert_eq!(favorites.len(), 2);
+        assert!(favorites.contains(&"alpha".to_string()));
+        assert!(favorites.contains(&"beta".to_string()));
+        assert!(store
+            .is_folder_favorite("alpha".to_string())
+            .await
+            .expect("alpha favorite"));
+
+        store
+            .set_folder_favorite("alpha".to_string(), false)
+            .await
+            .expect("remove alpha favorite");
+
+        assert!(!store
+            .is_folder_favorite("alpha".to_string())
+            .await
+            .expect("alpha not favorite"));
+        let favorites = store
+            .load_all_folder_favorites()
+            .await
+            .expect("load favorites after removal");
+        assert_eq!(favorites, vec!["beta".to_string()]);
     }
 }

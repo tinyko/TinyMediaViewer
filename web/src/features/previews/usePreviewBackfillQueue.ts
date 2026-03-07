@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import { fetchFolderPreviews, postPreviewDiagnostics } from "../../api";
-import type { FolderPayload, PreviewDiagEvent } from "../../types";
+import type { PreviewDiagEvent } from "../../types";
+import type { RootFolderStore } from "../root/rootStore";
 
 const ROOT_PREVIEW_BATCH_SIZE = 20;
 const ROOT_PREVIEW_MAX_CONCURRENCY = 4;
@@ -21,13 +22,11 @@ const parseStatusCode = (error: unknown): number | undefined => {
 };
 
 interface UsePreviewBackfillQueueOptions {
-  folder: FolderPayload | null;
-  setFolder: (updater: (previous: FolderPayload | null) => FolderPayload | null) => void;
+  rootStore: RootFolderStore;
 }
 
 export function usePreviewBackfillQueue({
-  folder,
-  setFolder,
+  rootStore,
 }: UsePreviewBackfillQueueOptions) {
   const rootPreviewSeq = useRef(0);
   const rootPreviewPending = useRef<string[]>([]);
@@ -90,58 +89,11 @@ export function usePreviewBackfillQueue({
     rootPreviewControllers.current.clear();
   }, []);
 
-  const applyPreviewBatch = useCallback(
-    (items: FolderPayload["subfolders"]) => {
-      if (!items.length) return;
-      const updateMap = new Map(items.map((item) => [item.path, item]));
-      setFolder((previous) => {
-        if (!previous) return previous;
-        let changed = false;
-        const subfolders = previous.subfolders.map((item) => {
-          const patch = updateMap.get(item.path);
-          if (!patch) return item;
-          changed = true;
-          return {
-            ...item,
-            modified: patch.modified,
-            counts: patch.counts,
-            previews: patch.previews,
-            countsReady: true,
-            previewReady: true,
-            approximate: false,
-          };
-        });
-        return changed ? { ...previous, subfolders } : previous;
-      });
-    },
-    [setFolder]
-  );
-
-  const markPreviewFailed = useCallback(
-    (paths: string[]) => {
-      if (!paths.length) return;
-      const failed = new Set(paths);
-      setFolder((previous) => {
-        if (!previous) return previous;
-        let changed = false;
-        const subfolders = previous.subfolders.map((item) => {
-          if (!failed.has(item.path) || item.countsReady) return item;
-          changed = true;
-          return {
-            ...item,
-            countsReady: true,
-            previewReady: false,
-            approximate: true,
-          };
-        });
-        return changed ? { ...previous, subfolders } : previous;
-      });
-    },
-    [setFolder]
-  );
-
   const requeueFailedPreviewPaths = useCallback(
-    (paths: string[], options?: { forceSingle?: boolean }) => {
+    (
+      paths: string[],
+      options?: { forceSingle?: boolean; expectedVersion?: number }
+    ) => {
       if (!paths.length) return;
       const exhausted: string[] = [];
 
@@ -171,9 +123,11 @@ export function usePreviewBackfillQueue({
         }
       }
 
-      markPreviewFailed(exhausted);
+      rootStore.markPreviewFailed(exhausted, {
+        expectedVersion: options?.expectedVersion,
+      });
     },
-    [markPreviewFailed]
+    [rootStore]
   );
 
   const pumpRootPreviewQueue = useCallback(() => {
@@ -215,7 +169,8 @@ export function usePreviewBackfillQueue({
       if (!batch.length) break;
 
       rootPreviewRunning.current += 1;
-      const requestId = `rp-${seq}-${Date.now()}-${Math.random()
+      const rootVersion = rootStore.getVersion();
+      const requestId = `rp-${seq}-${rootVersion}-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2, 8)}`;
       pushPreviewDiagEvent({
@@ -258,7 +213,9 @@ export function usePreviewBackfillQueue({
             requestId,
           });
 
-          applyPreviewBatch(result.items);
+          rootStore.applyPreviewBatch(result.items, {
+            expectedVersion: rootVersion,
+          });
           if (result.items.length) {
             pushPreviewDiagEvent({
               phase: "apply",
@@ -294,6 +251,7 @@ export function usePreviewBackfillQueue({
             });
             requeueFailedPreviewPaths([...failed], {
               forceSingle: batch.length > 1,
+              expectedVersion: rootVersion,
             });
           }
         })
@@ -316,6 +274,7 @@ export function usePreviewBackfillQueue({
           });
           requeueFailedPreviewPaths(batch, {
             forceSingle: batch.length > 1,
+            expectedVersion: rootVersion,
           });
         })
         .finally(() => {
@@ -330,7 +289,7 @@ export function usePreviewBackfillQueue({
           }
         });
     }
-  }, [applyPreviewBatch, pushPreviewDiagEvent, requeueFailedPreviewPaths]);
+  }, [pushPreviewDiagEvent, requeueFailedPreviewPaths, rootStore]);
 
   useEffect(() => {
     pumpRootPreviewQueueRef.current = pumpRootPreviewQueue;
@@ -339,12 +298,9 @@ export function usePreviewBackfillQueue({
   const enqueueRootPreviewPaths = useCallback(
     (paths: string[]) => {
       if (!paths.length) return;
-      const readyPaths = new Set(
-        folder?.subfolders.filter((item) => item.countsReady).map((item) => item.path)
-      );
       for (const input of paths) {
         const candidate = input.trim();
-        if (!candidate || readyPaths.has(candidate)) continue;
+        if (!candidate || rootStore.hasCountsReady(candidate)) continue;
         if (
           rootPreviewPendingSet.current.has(candidate) ||
           rootPreviewInFlight.current.has(candidate)
@@ -356,7 +312,7 @@ export function usePreviewBackfillQueue({
       }
       pumpRootPreviewQueue();
     },
-    [folder?.subfolders, pumpRootPreviewQueue]
+    [pumpRootPreviewQueue, rootStore]
   );
 
   useEffect(() => {

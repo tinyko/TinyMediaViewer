@@ -19,6 +19,16 @@ use tokio::{
     sync::{mpsc, Semaphore},
 };
 
+mod contracts;
+
+pub use contracts::{
+    EffectsMode, EffectsRenderer, FolderCounts, FolderFavoriteInput, FolderFavoriteOutput,
+    FolderIdentity, FolderMediaFilter, FolderMode, FolderPayload, FolderPreview,
+    FolderPreviewBatchError, FolderPreviewBatchInput, FolderPreviewBatchOutput, FolderTotals,
+    MediaItem, MediaKind, PerfDiagEvent, PerfDiagEventsInput, PreviewDiagEvent,
+    PreviewDiagEventsInput, PreviewDiagPhase,
+};
+
 const IMAGE_THUMBNAIL_MIN_BYTES: u64 = 512 * 1024;
 const PREVIEW_RESTORE_LIMIT: usize = 64;
 const ENCODE_URI_COMPONENT_SET: &AsciiSet = &CONTROLS
@@ -60,27 +70,6 @@ pub struct BackendConfig {
     pub thumbnail_cache_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum MediaKind {
-    Image,
-    Gif,
-    Video,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaItem {
-    pub name: String,
-    pub path: String,
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub thumbnail_url: Option<String>,
-    pub kind: MediaKind,
-    pub size: u64,
-    pub modified: f64,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedMediaBlob {
     name: String,
@@ -92,62 +81,6 @@ struct PersistedMediaBlob {
     modified: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderPreview {
-    pub name: String,
-    pub path: String,
-    pub modified: f64,
-    pub counts: FolderCounts,
-    pub previews: Vec<MediaItem>,
-    pub counts_ready: bool,
-    pub preview_ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub approximate: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderCounts {
-    pub images: usize,
-    pub gifs: usize,
-    pub videos: usize,
-    pub subfolders: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderPayload {
-    pub folder: FolderIdentity,
-    pub breadcrumb: Vec<FolderIdentity>,
-    pub subfolders: Vec<FolderPreview>,
-    pub media: Vec<MediaItem>,
-    pub totals: FolderTotals,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderIdentity {
-    pub name: String,
-    pub path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderTotals {
-    pub media: usize,
-    pub subfolders: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderPreviewBatchError {
-    pub path: String,
-    pub error: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct FolderPreviewBatchResult {
     pub items: Vec<FolderPreview>,
@@ -157,15 +90,9 @@ pub struct FolderPreviewBatchResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FolderMode {
-    Light,
-    Full,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FolderMediaFilter {
-    Image,
-    Video,
+pub enum FolderSortOrder {
+    Desc,
+    Asc,
 }
 
 #[derive(Debug, Clone)]
@@ -174,6 +101,7 @@ pub struct GetFolderOptions {
     pub limit: Option<usize>,
     pub mode: FolderMode,
     pub media_filter: Option<FolderMediaFilter>,
+    pub sort_order: FolderSortOrder,
 }
 
 impl Default for GetFolderOptions {
@@ -183,6 +111,7 @@ impl Default for GetFolderOptions {
             limit: None,
             mode: FolderMode::Full,
             media_filter: None,
+            sort_order: FolderSortOrder::Desc,
         }
     }
 }
@@ -190,6 +119,27 @@ impl Default for GetFolderOptions {
 impl BackendService {
     pub fn default_folder_page_limit(&self) -> usize {
         self.config.folder_page_limit
+    }
+
+    pub async fn set_folder_favorite(
+        &self,
+        relative_path: &str,
+        favorite: bool,
+    ) -> Result<FolderFavoriteOutput> {
+        let safe_relative_path = normalize_relative_path(relative_path)?;
+        if safe_relative_path.is_empty() {
+            return Err(anyhow!("Favorite path must not be empty"));
+        }
+
+        self.index
+            .set_folder_favorite(safe_relative_path.clone(), favorite)
+            .await?;
+        self.clear_snapshot_cache();
+
+        Ok(FolderFavoriteOutput {
+            path: safe_relative_path,
+            favorite,
+        })
     }
 }
 
@@ -319,34 +269,6 @@ struct PreviewBatchSummary<'a> {
     slowest_path: Option<&'a str>,
     slowest_ms: u64,
     failures: &'a [FolderPreviewBatchError],
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreviewDiagEvent {
-    pub ts: u64,
-    pub phase: String,
-    pub batch_size: usize,
-    pub paths: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub err: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PerfDiagEvent {
-    pub ts: u64,
-    pub fps_estimate: f64,
-    pub long_task_count10s: u32,
-    pub visible_cards: u32,
-    pub effects_mode: String,
-    pub renderer: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
 }
 
 impl DiagnosticsWriter {
@@ -505,8 +427,13 @@ impl BackendService {
             .limit
             .unwrap_or(self.config.folder_page_limit)
             .clamp(1, self.config.max_folder_page_limit);
-        let (media_page, next_cursor) =
-            page_media_for_filter(&snapshot.media, cursor, limit, options.media_filter)?;
+        let (media_page, next_cursor) = page_media_for_filter(
+            &snapshot.media,
+            cursor,
+            limit,
+            options.media_filter,
+            options.sort_order,
+        )?;
 
         Ok(FolderPageResult {
             snapshot,
@@ -710,8 +637,11 @@ impl BackendService {
         let (safe_relative_path, absolute_path) = self.resolve_paths(relative_path).await?;
         let generation = self.path_generation(&safe_relative_path);
         let cache_key = format!("light:{safe_relative_path}");
-        if let Some(snapshot) = self.read_snapshot_cache(&cache_key, generation) {
-            return Ok(snapshot);
+        let use_snapshot_cache = !safe_relative_path.is_empty();
+        if use_snapshot_cache {
+            if let Some(snapshot) = self.read_snapshot_cache(&cache_key, generation) {
+                return Ok(snapshot);
+            }
         }
 
         let scan = self
@@ -727,13 +657,15 @@ impl BackendService {
                 previews: Vec::new(),
                 counts_ready: false,
                 preview_ready: false,
+                favorite: false,
                 approximate: Some(true),
             });
         }
         subfolders.sort_by(|a, b| b.modified.total_cmp(&a.modified));
+        subfolders = self.annotate_folder_favorites(subfolders).await?;
 
         let mut media = self.build_media_items(scan.media_candidates).await?;
-        media.sort_by(|a, b| b.modified.total_cmp(&a.modified));
+        media.sort_by(compare_media_items_by_time_desc);
 
         let snapshot = Arc::new(FolderSnapshot {
             folder: folder_identity(&self.config.media_root, &safe_relative_path),
@@ -746,7 +678,9 @@ impl BackendService {
             media,
             default_page_media_json: None,
         });
-        self.write_snapshot_cache(cache_key, generation, snapshot.clone());
+        if use_snapshot_cache {
+            self.write_snapshot_cache(cache_key, generation, snapshot.clone());
+        }
         Ok(snapshot)
     }
 
@@ -773,6 +707,7 @@ impl BackendService {
             );
         }
         subfolders.sort_by(|a, b| b.modified.total_cmp(&a.modified));
+        subfolders = self.annotate_folder_favorites(subfolders).await?;
 
         let snapshot = Arc::new(FolderSnapshot {
             folder: folder_identity(&self.config.media_root, &safe_relative_path),
@@ -808,7 +743,7 @@ impl BackendService {
         let generation = self.path_generation(safe_relative_path);
         let cache_key = format!("preview:{safe_relative_path}:{preview_limit}");
         if let Some(preview) = self.read_preview_cache(&cache_key, generation) {
-            return Ok(preview);
+            return self.annotate_folder_favorite(preview).await;
         }
 
         let manifest = self
@@ -826,7 +761,7 @@ impl BackendService {
         {
             let preview = serde_json::from_str::<FolderPreview>(&serialized)?;
             self.write_preview_cache(cache_key, generation, preview.clone());
-            return Ok(preview);
+            return self.annotate_folder_favorite(preview).await;
         }
 
         let mut counts = FolderCounts {
@@ -855,6 +790,7 @@ impl BackendService {
                 .collect(),
             counts_ready: true,
             preview_ready: true,
+            favorite: false,
             approximate: Some(false),
         };
 
@@ -867,7 +803,7 @@ impl BackendService {
             )
             .await?;
         self.write_preview_cache(cache_key, generation, preview.clone());
-        Ok(preview)
+        self.annotate_folder_favorite(preview).await
     }
 
     async fn get_directory_manifest(
@@ -938,7 +874,7 @@ impl BackendService {
             .scan_folder_entries(absolute_path, safe_relative_path, true, true)
             .await?;
         let mut media = self.build_media_items(scan.media_candidates).await?;
-        media.sort_by(|a, b| b.modified.total_cmp(&a.modified));
+        media.sort_by(compare_media_items_by_time_desc);
         let default_page_media_json =
             build_default_page_media_json(&media, self.config.folder_page_limit)?;
 
@@ -1005,13 +941,16 @@ impl BackendService {
             serde_json::from_str::<Vec<FolderEntryCandidate>>(&record.subfolders_json)?;
         let watched_directories =
             serde_json::from_str::<Vec<FolderEntryCandidate>>(&record.watched_dirs_json)?;
-        let media = match record.media_bin {
+        let mut media = match record.media_bin {
             Some(media_bin) if !media_bin.is_empty() => {
                 let persisted = bincode::deserialize::<Vec<PersistedMediaBlob>>(&media_bin)?;
                 persisted.into_iter().map(MediaItem::from).collect()
             }
             _ => serde_json::from_str::<Vec<MediaItem>>(&record.media_json)?,
         };
+        media.sort_by(compare_media_items_by_time_desc);
+        let default_page_media_json =
+            build_default_page_media_json(&media, self.config.folder_page_limit)?;
         Ok(DirectoryManifest {
             root_modified: record.root_modified,
             stamp: record.stamp,
@@ -1019,9 +958,7 @@ impl BackendService {
             subfolders,
             watched_directories,
             media,
-            default_page_media_json: record
-                .default_page_media_json
-                .unwrap_or_else(|| "[]".to_string()),
+            default_page_media_json,
         })
     }
 
@@ -1162,7 +1099,7 @@ impl BackendService {
         if !category_candidates.is_empty() {
             media.extend(self.build_media_items(category_candidates).await?);
         }
-        media.sort_by(|a, b| b.modified.total_cmp(&a.modified));
+        media.sort_by(compare_media_items_by_time_desc);
         let default_page_media_json =
             build_default_page_media_json(&media, self.config.folder_page_limit)?;
 
@@ -1298,6 +1235,39 @@ impl BackendService {
         caches.snapshots.clear();
         caches.previews.clear();
         caches.manifests.clear();
+    }
+
+    fn clear_snapshot_cache(&self) {
+        self.caches
+            .lock()
+            .expect("scanner caches poisoned")
+            .snapshots
+            .clear();
+    }
+
+    async fn annotate_folder_favorite(&self, mut preview: FolderPreview) -> Result<FolderPreview> {
+        preview.favorite = self.index.is_folder_favorite(preview.path.clone()).await?;
+        Ok(preview)
+    }
+
+    async fn annotate_folder_favorites(
+        &self,
+        mut previews: Vec<FolderPreview>,
+    ) -> Result<Vec<FolderPreview>> {
+        if previews.is_empty() {
+            return Ok(previews);
+        }
+
+        let favorites = self
+            .index
+            .load_all_folder_favorites()
+            .await?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        for preview in &mut previews {
+            preview.favorite = favorites.contains(&preview.path);
+        }
+        Ok(previews)
     }
 
     async fn scan_folder_entries(
@@ -1573,7 +1543,12 @@ pub fn page_media_for_filter(
     cursor: usize,
     limit: usize,
     filter: Option<FolderMediaFilter>,
+    sort_order: FolderSortOrder,
 ) -> Result<(MediaPage, Option<String>)> {
+    if sort_order == FolderSortOrder::Asc {
+        return page_media_for_filter_asc(media, cursor, limit, filter);
+    }
+
     if filter.is_none() {
         if cursor > media.len() {
             return Err(anyhow!("Cursor exceeds media item count"));
@@ -1614,6 +1589,31 @@ pub fn page_media_for_filter(
 
     let next_cursor = has_more.then(|| (cursor + items.len()).to_string());
     Ok((MediaPage::Owned(items), next_cursor))
+}
+
+fn page_media_for_filter_asc(
+    media: &[MediaItem],
+    cursor: usize,
+    limit: usize,
+    filter: Option<FolderMediaFilter>,
+) -> Result<(MediaPage, Option<String>)> {
+    let mut sorted = match filter {
+        Some(filter) => media
+            .iter()
+            .filter(|item| matches_filter(item, filter))
+            .cloned()
+            .collect::<Vec<_>>(),
+        None => media.to_vec(),
+    };
+    sorted.sort_by(compare_media_items_by_time_asc);
+
+    if cursor > sorted.len() {
+        return Err(anyhow!("Cursor exceeds media item count"));
+    }
+
+    let end = (cursor + limit).min(sorted.len());
+    let next_cursor = (end < sorted.len()).then(|| end.to_string());
+    Ok((MediaPage::Owned(sorted[cursor..end].to_vec()), next_cursor))
 }
 
 fn matches_filter(item: &MediaItem, filter: FolderMediaFilter) -> bool {
@@ -1661,6 +1661,90 @@ fn build_media_item(
         size,
         modified,
     }
+}
+
+fn compare_media_items_by_time_desc(left: &MediaItem, right: &MediaItem) -> std::cmp::Ordering {
+    media_sort_time_key(right)
+        .cmp(&media_sort_time_key(left))
+        .then_with(|| left.name.cmp(&right.name))
+        .then_with(|| left.path.cmp(&right.path))
+}
+
+fn compare_media_items_by_time_asc(left: &MediaItem, right: &MediaItem) -> std::cmp::Ordering {
+    media_sort_time_key(left)
+        .cmp(&media_sort_time_key(right))
+        .then_with(|| left.name.cmp(&right.name))
+        .then_with(|| left.path.cmp(&right.path))
+}
+
+fn media_sort_time_key(item: &MediaItem) -> i64 {
+    timestamp_ms_from_name(&item.name).unwrap_or_else(|| item.modified.floor() as i64)
+}
+
+fn timestamp_ms_from_name(name: &str) -> Option<i64> {
+    let bytes = name.as_bytes();
+    if bytes.len() < 16 {
+        return None;
+    }
+
+    for start in 0..=bytes.len() - 16 {
+        let date_start = start + 1;
+        let time_start = start + 10;
+        if bytes[start] != b'_'
+            || bytes[start + 9] != b'_'
+            || !bytes[date_start..date_start + 8]
+                .iter()
+                .all(u8::is_ascii_digit)
+            || !bytes[time_start..time_start + 6]
+                .iter()
+                .all(u8::is_ascii_digit)
+        {
+            continue;
+        }
+
+        let year = parse_ascii_digits(&bytes[date_start..date_start + 4])?;
+        let month = parse_ascii_digits(&bytes[date_start + 4..date_start + 6])?;
+        let day = parse_ascii_digits(&bytes[date_start + 6..date_start + 8])?;
+        let hour = parse_ascii_digits(&bytes[time_start..time_start + 2])?;
+        let minute = parse_ascii_digits(&bytes[time_start + 2..time_start + 4])?;
+        let second = parse_ascii_digits(&bytes[time_start + 4..time_start + 6])?;
+
+        if !(1..=12).contains(&month)
+            || !(1..=31).contains(&day)
+            || hour > 23
+            || minute > 59
+            || second > 59
+        {
+            continue;
+        }
+
+        let days = days_from_civil(year, month, day);
+        let seconds = days * 86_400 + hour * 3_600 + minute * 60 + second;
+        return Some(seconds * 1_000);
+    }
+
+    None
+}
+
+fn parse_ascii_digits(bytes: &[u8]) -> Option<i64> {
+    let mut value = 0_i64;
+    for byte in bytes {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value * 10 + i64::from(byte - b'0');
+    }
+    Some(value)
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month_prime = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_prime + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 fn encode_path(value: &str) -> String {
@@ -1926,12 +2010,13 @@ fn now_ms_u64() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackendConfig, BackendService, DiagnosticsWriter, FolderMediaFilter, FolderMode,
-        GetFolderOptions, IndexStore,
+        page_media_for_filter, BackendConfig, BackendService, DiagnosticsWriter, FolderMediaFilter,
+        FolderMode, FolderSortOrder, GetFolderOptions, IndexStore, MediaItem, MediaKind,
     };
     use anyhow::Result;
     use tempfile::tempdir;
     use tokio::fs;
+    use tokio::time::{sleep, Duration};
 
     #[tokio::test]
     async fn scans_light_and_full_folder() -> Result<()> {
@@ -1983,6 +2068,360 @@ mod tests {
             )
             .await?;
         assert_eq!(full.media.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refreshes_root_light_snapshot_without_restart() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha")).await?;
+        fs::create_dir_all(root.join("beta")).await?;
+        fs::write(root.join("alpha/a.jpg"), b"alpha").await?;
+        sleep(Duration::from_millis(25)).await;
+        fs::write(root.join("beta/b.jpg"), b"beta").await?;
+
+        let service = BackendService::new(
+            BackendConfig {
+                media_root: root.clone(),
+                ffmpeg_bin: "ffmpeg".to_string(),
+                preview_limit: 6,
+                preview_batch_limit: 64,
+                folder_page_limit: 120,
+                max_folder_page_limit: 1000,
+                max_items_per_folder: 20_000,
+                stat_concurrency: 8,
+                thumbnail_cache_dir: thumbs,
+            },
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+
+        let first = service
+            .get_folder(
+                "",
+                GetFolderOptions {
+                    mode: FolderMode::Light,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(first.subfolders[0].path, "beta");
+        let first_alpha_modified = first
+            .subfolders
+            .iter()
+            .find(|item| item.path == "alpha")
+            .map(|item| item.modified)
+            .expect("alpha should exist");
+
+        sleep(Duration::from_millis(25)).await;
+        fs::write(root.join("alpha/c.jpg"), b"alpha-fresh").await?;
+
+        let second = service
+            .get_folder(
+                "",
+                GetFolderOptions {
+                    mode: FolderMode::Light,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let second_alpha_modified = second
+            .subfolders
+            .iter()
+            .find(|item| item.path == "alpha")
+            .map(|item| item.modified)
+            .expect("alpha should exist");
+        assert!(second_alpha_modified > first_alpha_modified);
+        assert_eq!(second.subfolders[0].path, "alpha");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn favorites_persist_into_root_light_snapshot() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha")).await?;
+        fs::create_dir_all(root.join("beta")).await?;
+
+        let service = BackendService::new(
+            BackendConfig {
+                media_root: root.clone(),
+                ffmpeg_bin: "ffmpeg".to_string(),
+                preview_limit: 6,
+                preview_batch_limit: 64,
+                folder_page_limit: 120,
+                max_folder_page_limit: 1000,
+                max_items_per_folder: 20_000,
+                stat_concurrency: 8,
+                thumbnail_cache_dir: thumbs,
+            },
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+
+        let initial = service
+            .get_folder(
+                "",
+                GetFolderOptions {
+                    mode: FolderMode::Light,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert!(
+            initial.subfolders.iter().all(|item| !item.favorite),
+            "new root snapshots should start without favorites"
+        );
+
+        service.set_folder_favorite("alpha", true).await?;
+        let favorited = service
+            .get_folder(
+                "",
+                GetFolderOptions {
+                    mode: FolderMode::Light,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            favorited
+                .subfolders
+                .iter()
+                .find(|item| item.path == "alpha")
+                .map(|item| item.favorite),
+            Some(true)
+        );
+
+        service.set_folder_favorite("alpha", false).await?;
+        let cleared = service
+            .get_folder(
+                "",
+                GetFolderOptions {
+                    mode: FolderMode::Light,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            cleared
+                .subfolders
+                .iter()
+                .find(|item| item.path == "alpha")
+                .map(|item| item.favorite),
+            Some(false)
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pages_category_media_by_filename_timestamp_desc() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        fs::write(
+            root.join("alpha/images/IMG_20260102_000000.jpg"),
+            b"newest-by-name",
+        )
+        .await?;
+        sleep(Duration::from_millis(25)).await;
+        fs::write(
+            root.join("alpha/images/IMG_20241231_000000.jpg"),
+            b"oldest-by-name",
+        )
+        .await?;
+        sleep(Duration::from_millis(25)).await;
+        fs::write(
+            root.join("alpha/images/IMG_20260101_000000.jpg"),
+            b"second-newest-by-name",
+        )
+        .await?;
+        sleep(Duration::from_millis(25)).await;
+        fs::write(
+            root.join("alpha/images/IMG_20250101_000000.jpg"),
+            b"second-oldest-by-name",
+        )
+        .await?;
+
+        let service = BackendService::new(
+            BackendConfig {
+                media_root: root.clone(),
+                ffmpeg_bin: "ffmpeg".to_string(),
+                preview_limit: 6,
+                preview_batch_limit: 64,
+                folder_page_limit: 120,
+                max_folder_page_limit: 1000,
+                max_items_per_folder: 20_000,
+                stat_concurrency: 8,
+                thumbnail_cache_dir: thumbs,
+            },
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+
+        let first_page = service
+            .get_folder(
+                "alpha",
+                GetFolderOptions {
+                    limit: Some(2),
+                    mode: FolderMode::Full,
+                    media_filter: Some(FolderMediaFilter::Image),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let second_page = service
+            .get_folder(
+                "alpha",
+                GetFolderOptions {
+                    cursor: first_page.next_cursor.clone(),
+                    limit: Some(2),
+                    mode: FolderMode::Full,
+                    media_filter: Some(FolderMediaFilter::Image),
+                    sort_order: FolderSortOrder::Desc,
+                },
+            )
+            .await?;
+        let first_page_asc = service
+            .get_folder(
+                "alpha",
+                GetFolderOptions {
+                    limit: Some(2),
+                    mode: FolderMode::Full,
+                    media_filter: Some(FolderMediaFilter::Image),
+                    sort_order: FolderSortOrder::Asc,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let second_page_asc = service
+            .get_folder(
+                "alpha",
+                GetFolderOptions {
+                    cursor: first_page_asc.next_cursor.clone(),
+                    limit: Some(2),
+                    mode: FolderMode::Full,
+                    media_filter: Some(FolderMediaFilter::Image),
+                    sort_order: FolderSortOrder::Asc,
+                },
+            )
+            .await?;
+
+        assert_eq!(
+            first_page
+                .media
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IMG_20260102_000000.jpg", "IMG_20260101_000000.jpg"]
+        );
+        assert_eq!(
+            second_page
+                .media
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IMG_20250101_000000.jpg", "IMG_20241231_000000.jpg"]
+        );
+        assert_eq!(
+            first_page_asc
+                .media
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IMG_20241231_000000.jpg", "IMG_20250101_000000.jpg"]
+        );
+        assert_eq!(
+            second_page_asc
+                .media
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IMG_20260101_000000.jpg", "IMG_20260102_000000.jpg"]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn pages_ascending_media_without_reversing_same_timestamp_groups() -> Result<()> {
+        let media = vec![
+            MediaItem {
+                name: "IMG_20260102_000000_01.jpg".to_string(),
+                path: "alpha/IMG_20260102_000000_01.jpg".to_string(),
+                url: "/media/alpha/IMG_20260102_000000_01.jpg".to_string(),
+                thumbnail_url: None,
+                kind: MediaKind::Image,
+                size: 1,
+                modified: 4.0,
+            },
+            MediaItem {
+                name: "IMG_20260102_000000_02.jpg".to_string(),
+                path: "alpha/IMG_20260102_000000_02.jpg".to_string(),
+                url: "/media/alpha/IMG_20260102_000000_02.jpg".to_string(),
+                thumbnail_url: None,
+                kind: MediaKind::Image,
+                size: 1,
+                modified: 3.0,
+            },
+            MediaItem {
+                name: "IMG_20260101_000000_01.jpg".to_string(),
+                path: "alpha/IMG_20260101_000000_01.jpg".to_string(),
+                url: "/media/alpha/IMG_20260101_000000_01.jpg".to_string(),
+                thumbnail_url: None,
+                kind: MediaKind::Image,
+                size: 1,
+                modified: 2.0,
+            },
+            MediaItem {
+                name: "IMG_20260101_000000_02.jpg".to_string(),
+                path: "alpha/IMG_20260101_000000_02.jpg".to_string(),
+                url: "/media/alpha/IMG_20260101_000000_02.jpg".to_string(),
+                thumbnail_url: None,
+                kind: MediaKind::Image,
+                size: 1,
+                modified: 1.0,
+            },
+        ];
+
+        let (page, next_cursor) = page_media_for_filter(
+            &media,
+            0,
+            4,
+            Some(FolderMediaFilter::Image),
+            FolderSortOrder::Asc,
+        )?;
+        let ordered = page
+            .into_owned(&media)
+            .into_iter()
+            .map(|item| item.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(next_cursor, None);
+        assert_eq!(
+            ordered,
+            vec![
+                "IMG_20260101_000000_01.jpg",
+                "IMG_20260101_000000_02.jpg",
+                "IMG_20260102_000000_01.jpg",
+                "IMG_20260102_000000_02.jpg",
+            ]
+        );
+
         Ok(())
     }
 }

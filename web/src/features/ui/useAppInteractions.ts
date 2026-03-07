@@ -13,7 +13,6 @@ const makeHeartCursor = (hue: number) => {
 interface UseAppInteractionsOptions {
   selected: MediaItem | null;
   effectsEnabled: boolean;
-  heartHue: number;
   previewScrollRef: RefObject<HTMLDivElement | null>;
   resetRootPreviewQueue: () => void;
   scrollTrackingKey: string;
@@ -22,7 +21,6 @@ interface UseAppInteractionsOptions {
 export function useAppInteractions({
   selected,
   effectsEnabled,
-  heartHue,
   previewScrollRef,
   resetRootPreviewQueue,
   scrollTrackingKey,
@@ -35,6 +33,23 @@ export function useAppInteractions({
   const heartCursorPos = useRef({ x: 0, y: 0 });
   const heartCursorRaf = useRef<number | null>(null);
   const heartCursorVisibleRef = useRef(false);
+  const heartHueRef = useRef(0);
+
+  const applyHeartCursorStyle = useCallback((hue: number) => {
+    const color = `hsl(${hue},85%,70%)`;
+    const cursor = makeHeartCursor(hue);
+    document.documentElement.style.setProperty("--cursor-heart", cursor);
+    document.documentElement.style.setProperty("--cursor-heart-fill", color);
+  }, []);
+
+  const onHeartHueChange = useCallback(
+    (hue: number) => {
+      heartHueRef.current = hue;
+      if (!effectsEnabled) return;
+      applyHeartCursorStyle(hue);
+    },
+    [applyHeartCursorStyle, effectsEnabled]
+  );
 
   useEffect(() => {
     heartCursorVisibleRef.current = heartCursorVisible;
@@ -110,11 +125,8 @@ export function useAppInteractions({
 
   useEffect(() => {
     if (!effectsEnabled) return;
-    const color = `hsl(${heartHue},85%,70%)`;
-    const cursor = makeHeartCursor(heartHue);
-    document.documentElement.style.setProperty("--cursor-heart", cursor);
-    document.documentElement.style.setProperty("--cursor-heart-fill", color);
-  }, [effectsEnabled, heartHue]);
+    applyHeartCursorStyle(heartHueRef.current);
+  }, [applyHeartCursorStyle, effectsEnabled]);
 
   useEffect(() => {
     return () => {
@@ -131,6 +143,7 @@ export function useAppInteractions({
     heartCursorVisible,
     heartCursorRef,
     hoveredCardRef,
+    onHeartHueChange,
     scrollToTop,
   };
 }

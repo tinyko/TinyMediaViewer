@@ -8,34 +8,40 @@ on:
   workflow_dispatch:
 
 jobs:
-  server:
-    name: Server Lint/Test/Build
+  backend:
+    name: Rust Backend
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: server
+        working-directory: backend-rs
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: server/package-lock.json
+          components: rustfmt
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend-rs
 
-      - name: Lint
-        run: npm run lint
+      - name: Format Check
+        run: cargo fmt --check
 
-      - name: Test
-        run: npm test
+      - name: Workspace Check
+        run: cargo check --workspace
 
-      - name: Build
-        run: npm run build
+      - name: Workspace Test
+        run: cargo test --workspace
+
+      - name: Build Backend App
+        run: cargo build -p tmv-backend-app
+
+      - name: Verify Generated Contracts
+        run: cargo run -p tmv-contract-export -- --check
 
   web:
     name: Web Lint/Test/Build
@@ -65,52 +71,3 @@ jobs:
 
       - name: Build
         run: npm run build
-
-  performance:
-    name: Performance Benchmark (Manual)
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: server/package-lock.json
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Prepare fixture media root
-        run: |
-          ROOT="/tmp/tmv-perf-root"
-          rm -rf "$ROOT"
-          mkdir -p "$ROOT/account-a/images" "$ROOT/account-b/videos"
-          for i in $(seq 1 120); do
-            printf "img-%s" "$i" > "$ROOT/account-a/images/$i.jpg"
-          done
-          for i in $(seq 1 80); do
-            printf "vid-%s" "$i" > "$ROOT/account-b/videos/$i.mp4"
-          done
-          echo "MEDIA_ROOT=$ROOT" >> "$GITHUB_ENV"
-
-      - name: Build server
-        run: npm run build
-
-      - name: Run benchmark
-        run: npm run perf:bench
-
-      - name: Assert thresholds
-        run: npm run perf:assert
-
-      - name: Upload perf reports
-        uses: actions/upload-artifact@v4
-        with:
-          name: perf-reports
-          path: server/perf-reports/*.json

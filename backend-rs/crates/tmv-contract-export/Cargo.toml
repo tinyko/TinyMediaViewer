@@ -1,0 +1,10 @@
+[package]
+name = "tmv-contract-export"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+tmv-backend-core = { path = "../tmv-backend-core" }
+ts-rs.workspace = true

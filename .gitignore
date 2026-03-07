@@ -18,3 +18,5 @@ backend-rs/.tmp
 server/.tmp
 server/perf-reports
 server/audit-reports
+archive/node-legacy/server/.tmp
+archive/node-legacy/server/perf-reports

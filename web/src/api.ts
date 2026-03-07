@@ -1,4 +1,6 @@
 import type {
+  FolderFavoriteInput,
+  FolderFavoriteOutput,
   FolderPayload,
   PerfDiagEventsInput,
   FolderPreviewBatchInput,
@@ -11,6 +13,7 @@ interface FetchFolderOptions {
   limit?: number;
   mode?: "light" | "full";
   kind?: "image" | "video";
+  sort?: "asc" | "desc";
   signal?: AbortSignal;
 }
 
@@ -29,6 +32,9 @@ export async function fetchFolder(
   }
   if (options.kind) {
     params.set("kind", options.kind);
+  }
+  if (options.sort) {
+    params.set("sort", options.sort);
   }
   const query = params.toString();
   const url = query ? `/api/folder?${query}` : "/api/folder";
@@ -69,6 +75,29 @@ export async function fetchFolderPreviews(
       typeof payload.error === "string"
         ? payload.error
         : `Failed to load folder previews (${response.status})`;
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
+export async function postFolderFavorite(
+  input: FolderFavoriteInput
+): Promise<FolderFavoriteOutput> {
+  const response = await fetch("/api/folder/favorite", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const message =
+      typeof payload.error === "string"
+        ? payload.error
+        : `Failed to save favorite (${response.status})`;
     throw new Error(message);
   }
 

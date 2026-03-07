@@ -13,6 +13,7 @@ serde_json.workspace = true
 sha1.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+ts-rs.workspace = true
 tmv-backend-index = { path = "../tmv-backend-index" }
 tmv-backend-watch = { path = "../tmv-backend-watch" }
 

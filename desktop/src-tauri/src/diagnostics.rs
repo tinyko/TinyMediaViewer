@@ -65,18 +65,6 @@ pub struct PerfDiagEvent {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PreviewDiagEventsInput {
-    pub events: Vec<PreviewDiagEvent>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PerfDiagEventsInput {
-    pub events: Vec<PerfDiagEvent>,
-}
-
 #[derive(Debug)]
 struct DiagnosticsInner {
     events: VecDeque<PreviewDiagEvent>,

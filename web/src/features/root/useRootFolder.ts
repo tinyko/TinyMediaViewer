@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchFolder } from "../../api";
 import type { FolderPayload } from "../../types";
+import { createRootFolderStore } from "./rootStore";
 
 const SERVER_PAGE_SIZE = 240;
 
@@ -14,9 +15,9 @@ interface UseRootFolderOptions {
 
 export function useRootFolder(options: UseRootFolderOptions = {}) {
   const { onBeforeLoad, onUnmount } = options;
-  const [folder, setFolder] = useState<FolderPayload | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const store = useMemo(() => createRootFolderStore(), []);
 
   const abortRef = useRef<AbortController | null>(null);
   const requestSeq = useRef(0);
@@ -38,7 +39,7 @@ export function useRootFolder(options: UseRootFolderOptions = {}) {
         signal: controller.signal,
       });
       if (requestId !== requestSeq.current) return null;
-      setFolder(payload);
+      store.replaceRoot(payload);
       return payload;
     } catch (err) {
       if (isAbortError(err)) return null;
@@ -50,7 +51,7 @@ export function useRootFolder(options: UseRootFolderOptions = {}) {
         setLoading(false);
       }
     }
-  }, [onBeforeLoad]);
+  }, [onBeforeLoad, store]);
 
   useEffect(() => {
     void loadRoot();
@@ -61,8 +62,7 @@ export function useRootFolder(options: UseRootFolderOptions = {}) {
   }, [loadRoot, onUnmount]);
 
   return {
-    folder,
-    setFolder,
+    store,
     loading,
     error,
     loadRoot,

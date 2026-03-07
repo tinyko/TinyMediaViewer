@@ -1,35 +1,54 @@
-import { startTransition, useCallback, useEffect, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { fetchFolder } from "../../api";
-import type { FolderPayload } from "../../types";
+import type { FolderPayload, MediaItem } from "../../types";
 import { mergeMediaByPath } from "./mediaUtils";
 
 const SERVER_PAGE_SIZE = 120;
 const INITIAL_VISIBLE_ITEMS = 48;
 const PAGE_STEP = 32;
+const EMPTY_MEDIA: MediaItem[] = [];
+
+type CategoryMediaFilter = "image" | "video";
+type MediaSortDirection = "asc" | "desc";
 
 type CategoryCacheEntry = {
   payload: FolderPayload;
+  media: MediaItem[];
   nextCursor?: string;
 };
 
-type CategoryMediaFilter = "image" | "video";
-
 interface SelectCategoryOptions {
   forceReload?: boolean;
+  expectedRootVersion?: number;
 }
 
 const isAbortError = (error: unknown) =>
   error instanceof DOMException && error.name === "AbortError";
 
 interface UseCategoryMediaOptions {
-  rootFolder: FolderPayload | null;
+  rootVersion: number;
   mediaFilter: CategoryMediaFilter;
+  mediaSort: MediaSortDirection;
 }
 
-const makeCategoryCacheKey = (path: string, mediaFilter: CategoryMediaFilter) =>
-  `${mediaFilter}:${path}`;
+const makeCategoryCacheKey = (
+  path: string,
+  mediaFilter: CategoryMediaFilter,
+  mediaSort: MediaSortDirection
+) => `${mediaFilter}:${mediaSort}:${path}`;
 
-export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOptions) {
+export function useCategoryMedia({
+  rootVersion,
+  mediaFilter,
+  mediaSort,
+}: UseCategoryMediaOptions) {
   const [categoryPath, setCategoryPath] = useState<string | null>(null);
   const [categoryPreview, setCategoryPreview] = useState<FolderPayload | null>(null);
   const [categoryVisibleCount, setCategoryVisibleCount] = useState(INITIAL_VISIBLE_ITEMS);
@@ -43,16 +62,23 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
   const categoryLoadMoreAbortRef = useRef<AbortController | null>(null);
   const categoryRequestSeq = useRef(0);
   const categoryLoadMoreSeq = useRef(0);
-  const previousMediaFilterRef = useRef<CategoryMediaFilter>(mediaFilter);
+  const previousQueryKeyRef = useRef(`${mediaFilter}:${mediaSort}`);
+  const rootVersionRef = useRef(rootVersion);
+
+  useEffect(() => {
+    rootVersionRef.current = rootVersion;
+  }, [rootVersion]);
 
   const clearCategoryState = useCallback((nextPath: string | null = null) => {
-    setCategoryPath(nextPath);
-    setCategoryPreview(null);
-    setCategoryVisibleCount(INITIAL_VISIBLE_ITEMS);
-    setCategoryLoading(false);
-    setCategoryLoadingMore(false);
-    setCategoryHasMore(false);
-    setCategoryError(null);
+    startTransition(() => {
+      setCategoryPath(nextPath);
+      setCategoryPreview(null);
+      setCategoryVisibleCount(INITIAL_VISIBLE_ITEMS);
+      setCategoryLoading(false);
+      setCategoryLoadingMore(false);
+      setCategoryHasMore(false);
+      setCategoryError(null);
+    });
   }, []);
 
   const invalidateCategoryCache = useCallback(() => {
@@ -62,8 +88,10 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
     categoryRequestSeq.current += 1;
     categoryLoadMoreSeq.current += 1;
     previewCache.current.clear();
-    setCategoryLoading(false);
-    setCategoryLoadingMore(false);
+    startTransition(() => {
+      setCategoryLoading(false);
+      setCategoryLoadingMore(false);
+    });
   }, []);
 
   const loadCategory = useCallback(
@@ -71,14 +99,20 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
       path: string,
       options: SelectCategoryOptions = {}
     ): Promise<FolderPayload | null> => {
-      const { forceReload = false } = options;
-      const cacheKey = makeCategoryCacheKey(path, mediaFilter);
+      const {
+        forceReload = false,
+        expectedRootVersion = rootVersionRef.current,
+      } = options;
+      const cacheKey = makeCategoryCacheKey(path, mediaFilter, mediaSort);
 
-      setCategoryPath(path);
-      setCategoryLoading(true);
-      setCategoryError(null);
-      setCategoryHasMore(false);
-      setCategoryLoadingMore(false);
+      startTransition(() => {
+        setCategoryPath(path);
+        setCategoryLoading(true);
+        setCategoryError(null);
+        setCategoryHasMore(false);
+        setCategoryLoadingMore(false);
+        setCategoryVisibleCount(INITIAL_VISIBLE_ITEMS);
+      });
       categoryLoadMoreSeq.current += 1;
 
       const requestId = ++categoryRequestSeq.current;
@@ -89,10 +123,14 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
       try {
         const cached = forceReload ? undefined : previewCache.current.get(cacheKey);
         if (cached) {
-          if (requestId !== categoryRequestSeq.current) return null;
+          if (
+            requestId !== categoryRequestSeq.current ||
+            expectedRootVersion !== rootVersionRef.current
+          ) {
+            return null;
+          }
           startTransition(() => {
             setCategoryPreview(cached.payload);
-            setCategoryVisibleCount(INITIAL_VISIBLE_ITEMS);
             setCategoryHasMore(Boolean(cached.nextCursor));
           });
           return cached.payload;
@@ -102,35 +140,45 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
           limit: SERVER_PAGE_SIZE,
           mode: "full",
           kind: mediaFilter,
+          sort: mediaSort,
           signal: controller.signal,
         });
-        if (requestId !== categoryRequestSeq.current) return null;
+        if (
+          requestId !== categoryRequestSeq.current ||
+          expectedRootVersion !== rootVersionRef.current
+        ) {
+          return null;
+        }
 
         const entry: CategoryCacheEntry = {
-          payload: { ...payload, media: [...payload.media] },
+          payload: { ...payload, media: payload.media.slice() },
+          media: payload.media.slice(),
           nextCursor: payload.nextCursor,
         };
         previewCache.current.set(cacheKey, entry);
         startTransition(() => {
           setCategoryPreview(entry.payload);
-          setCategoryVisibleCount(INITIAL_VISIBLE_ITEMS);
           setCategoryHasMore(Boolean(entry.nextCursor));
         });
         return entry.payload;
       } catch (err) {
         if (isAbortError(err)) return null;
         const message = err instanceof Error ? err.message : "加载失败";
-        setCategoryError(message);
-        setCategoryPreview(null);
-        setCategoryHasMore(false);
+        startTransition(() => {
+          setCategoryError(message);
+          setCategoryPreview(null);
+          setCategoryHasMore(false);
+        });
         return null;
       } finally {
         if (requestId === categoryRequestSeq.current) {
-          setCategoryLoading(false);
+          startTransition(() => {
+            setCategoryLoading(false);
+          });
         }
       }
     },
-    [mediaFilter]
+    [mediaFilter, mediaSort]
   );
 
   const resetCategory = useCallback(() => {
@@ -138,14 +186,18 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
     clearCategoryState();
   }, [clearCategoryState, invalidateCategoryCache]);
 
-  const handleSelectCategory = useCallback(async (path: string) => {
-    await loadCategory(path);
-  }, [loadCategory]);
+  const handleSelectCategory = useCallback(
+    async (path: string) => {
+      await loadCategory(path);
+    },
+    [loadCategory]
+  );
 
   const refreshCategory = useCallback(
     async (
       nextRootFolder: FolderPayload | null,
-      preferredPath: string | null
+      preferredPath: string | null,
+      expectedRootVersion = rootVersionRef.current
     ): Promise<FolderPayload | null> => {
       invalidateCategoryCache();
 
@@ -160,28 +212,35 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
         return null;
       }
 
-      setCategoryPath(nextPath);
-      return loadCategory(nextPath, { forceReload: true });
+      return loadCategory(nextPath, {
+        forceReload: true,
+        expectedRootVersion,
+      });
     },
     [clearCategoryState, invalidateCategoryCache, loadCategory]
   );
 
   const loadMoreCategory = useCallback(async () => {
     if (!categoryPath || categoryLoadingMore || !categoryHasMore) return;
-    const cacheKey = makeCategoryCacheKey(categoryPath, mediaFilter);
+    const cacheKey = makeCategoryCacheKey(categoryPath, mediaFilter, mediaSort);
     const cached = previewCache.current.get(cacheKey);
     if (!cached?.nextCursor) {
-      setCategoryHasMore(false);
+      startTransition(() => {
+        setCategoryHasMore(false);
+      });
       return;
     }
 
     const expectedCursor = cached.nextCursor;
+    const expectedRootVersion = rootVersionRef.current;
     const requestId = ++categoryLoadMoreSeq.current;
     categoryLoadMoreAbortRef.current?.abort();
     const controller = new AbortController();
     categoryLoadMoreAbortRef.current = controller;
-    setCategoryError(null);
-    setCategoryLoadingMore(true);
+    startTransition(() => {
+      setCategoryError(null);
+      setCategoryLoadingMore(true);
+    });
 
     try {
       const payload = await fetchFolder(categoryPath, {
@@ -189,24 +248,32 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
         limit: SERVER_PAGE_SIZE,
         mode: "full",
         kind: mediaFilter,
+        sort: mediaSort,
         signal: controller.signal,
       });
-      if (requestId !== categoryLoadMoreSeq.current) return;
+      if (
+        requestId !== categoryLoadMoreSeq.current ||
+        expectedRootVersion !== rootVersionRef.current
+      ) {
+        return;
+      }
 
       const latest = previewCache.current.get(cacheKey);
       if (!latest || latest.nextCursor !== expectedCursor) return;
 
+      const media = mergeMediaByPath(latest.media, payload.media);
       const mergedPayload: FolderPayload = {
         ...latest.payload,
         folder: payload.folder,
         breadcrumb: payload.breadcrumb,
         subfolders: payload.subfolders,
         totals: payload.totals,
-        media: mergeMediaByPath(latest.payload.media, payload.media),
+        media,
       };
 
       previewCache.current.set(cacheKey, {
         payload: mergedPayload,
+        media,
         nextCursor: payload.nextCursor,
       });
 
@@ -217,60 +284,53 @@ export function useCategoryMedia({ rootFolder, mediaFilter }: UseCategoryMediaOp
     } catch (err) {
       if (isAbortError(err)) return;
       const message = err instanceof Error ? err.message : "加载失败";
-      setCategoryError(message);
+      startTransition(() => {
+        setCategoryError(message);
+      });
     } finally {
       if (categoryLoadMoreAbortRef.current === controller) {
         categoryLoadMoreAbortRef.current = null;
       }
       if (requestId === categoryLoadMoreSeq.current) {
-        setCategoryLoadingMore(false);
+        startTransition(() => {
+          setCategoryLoadingMore(false);
+        });
       }
     }
-  }, [categoryHasMore, categoryLoadingMore, categoryPath, mediaFilter]);
+  }, [categoryHasMore, categoryLoadingMore, categoryPath, mediaFilter, mediaSort]);
 
   const revealMoreLocal = useCallback(() => {
-    setCategoryVisibleCount((previous) => previous + PAGE_STEP);
+    startTransition(() => {
+      setCategoryVisibleCount((previous) => previous + PAGE_STEP);
+    });
   }, []);
 
-  useEffect(() => {
-    if (!rootFolder) {
-      resetCategory();
-      return;
-    }
-
-    if (!rootFolder.subfolders.length) {
-      resetCategory();
-      return;
-    }
-
-    if (!categoryPath) {
-      void handleSelectCategory(rootFolder.subfolders[0].path);
-      return;
-    }
-
-    const exists = rootFolder.subfolders.some((item) => item.path === categoryPath);
-    if (!exists) {
-      void handleSelectCategory(rootFolder.subfolders[0].path);
-    }
-  }, [categoryPath, handleSelectCategory, resetCategory, rootFolder]);
+  const currentCacheKey = categoryPath
+    ? makeCategoryCacheKey(categoryPath, mediaFilter, mediaSort)
+    : null;
+  const categoryMedia = useMemo(() => {
+    if (!currentCacheKey || !categoryPreview) return EMPTY_MEDIA;
+    return previewCache.current.get(currentCacheKey)?.media ?? EMPTY_MEDIA;
+  }, [categoryPreview, currentCacheKey]);
+  const visibleMedia = useMemo(
+    () => categoryMedia.slice(0, categoryVisibleCount),
+    [categoryMedia, categoryVisibleCount]
+  );
 
   useEffect(() => {
-    if (previousMediaFilterRef.current === mediaFilter) return;
-    previousMediaFilterRef.current = mediaFilter;
+    const nextQueryKey = `${mediaFilter}:${mediaSort}`;
+    if (previousQueryKeyRef.current === nextQueryKey) return;
+    previousQueryKeyRef.current = nextQueryKey;
     if (!categoryPath) return;
     void loadCategory(categoryPath);
-  }, [categoryPath, loadCategory, mediaFilter]);
-
-  useEffect(() => {
-    return () => {
-      categoryAbortRef.current?.abort();
-      categoryLoadMoreAbortRef.current?.abort();
-    };
-  }, []);
+  }, [categoryPath, loadCategory, mediaFilter, mediaSort]);
 
   return {
     categoryPath,
     categoryPreview,
+    categoryMedia,
+    visibleMedia,
+    totalFilteredCount: categoryMedia.length,
     categoryVisibleCount,
     categoryLoading,
     categoryLoadingMore,

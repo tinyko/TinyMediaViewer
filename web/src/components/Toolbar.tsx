@@ -1,3 +1,4 @@
+import { memo } from "react";
 import type { EffectsMode } from "../types";
 
 type Theme = "light" | "dark";
@@ -18,8 +19,8 @@ interface ToolbarProps {
   onReauthenticate: () => void;
   refreshing: boolean;
   onRefresh: () => void;
-  sortMode: "time" | "name";
-  setSortMode: (mode: "time" | "name") => void;
+  sortMode: "time" | "name" | "favorite";
+  setSortMode: (mode: "time" | "name" | "favorite") => void;
   search: string;
   setSearch: (value: string) => void;
   filteredCount: number;
@@ -37,7 +38,7 @@ const modeLabel: Record<EffectsMode, string> = {
   full: "效",
 };
 
-export function Toolbar(props: ToolbarProps) {
+export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
   const {
     versionLabel,
     versionFingerprint,
@@ -114,8 +115,13 @@ export function Toolbar(props: ToolbarProps) {
 
       <div className="controls condensed">
         <div className="controls__actions wide">
-          <div className="toggle-switch mini sort-toggle">
-            <div className="toggle-indicator" data-side={sortMode === "time" ? "left" : "right"} />
+          <div className="toggle-switch mini triple sort-toggle">
+            <div
+              className="toggle-indicator"
+              data-index={
+                sortMode === "time" ? "0" : sortMode === "name" ? "1" : "2"
+              }
+            />
             <button
               className={`toggle-option ${sortMode === "time" ? "active" : ""}`}
               onClick={() => setSortMode("time")}
@@ -129,6 +135,13 @@ export function Toolbar(props: ToolbarProps) {
               aria-pressed={sortMode === "name"}
             >
               按名称
+            </button>
+            <button
+              className={`toggle-option ${sortMode === "favorite" ? "active" : ""}`}
+              onClick={() => setSortMode("favorite")}
+              aria-pressed={sortMode === "favorite"}
+            >
+              按收藏
             </button>
           </div>
 
@@ -205,4 +218,4 @@ export function Toolbar(props: ToolbarProps) {
       </div>
     </>
   );
-}
+});

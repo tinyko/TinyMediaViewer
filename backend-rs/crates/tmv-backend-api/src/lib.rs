@@ -19,8 +19,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tmv_backend_core::{
-    BackendService, FolderIdentity, FolderMediaFilter, FolderMode, FolderPreview, FolderSnapshot,
-    FolderTotals, GetFolderOptions, MediaItem, MediaPage, PerfDiagEvent, PreviewDiagEvent,
+    BackendService, FolderFavoriteInput, FolderFavoriteOutput, FolderIdentity, FolderMediaFilter,
+    FolderMode, FolderPreview, FolderPreviewBatchOutput, FolderSnapshot, FolderSortOrder,
+    FolderTotals, GetFolderOptions, MediaItem, MediaPage, PerfDiagEventsInput,
+    PreviewDiagEventsInput,
 };
 use tokio::{
     fs,
@@ -62,18 +64,6 @@ pub enum AccessMode {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PreviewEventsInput {
-    events: Vec<PreviewDiagEvent>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PerfEventsInput {
-    events: Vec<PerfDiagEvent>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct AuthQuery {
     return_to: Option<String>,
 }
@@ -104,6 +94,7 @@ pub fn build_api_router() -> Router<ApiState> {
         .route("/__tmv/auth", get(trigger_auth))
         .route("/__tmv/auth-complete", get(auth_complete))
         .route("/api/folder", get(get_folder))
+        .route("/api/folder/favorite", post(set_folder_favorite))
         .route("/api/folder/previews", post(get_folder_previews))
         .route("/media/{*path}", get(get_media))
         .route("/thumb/{*path}", get(get_thumbnail))
@@ -268,10 +259,15 @@ async fn get_folder(
         Ok(filter) => filter,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
     };
+    let sort_order = match parse_sort_order(query.get("sort").map(String::as_str)) {
+        Ok(order) => order,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
+    };
     let default_limit = state.service.default_folder_page_limit();
     let requested_limit = limit.unwrap_or(default_limit);
     let wants_preencoded_default_page = mode == FolderMode::Full
         && media_filter.is_none()
+        && sort_order == FolderSortOrder::Desc
         && query.get("cursor").is_none_or(|value| value.is_empty())
         && requested_limit == default_limit;
 
@@ -284,6 +280,7 @@ async fn get_folder(
                 limit,
                 mode,
                 media_filter,
+                sort_order,
             },
         )
         .await
@@ -415,11 +412,29 @@ async fn get_folder_previews(State(state): State<ApiState>, Json(input): Json<Va
         .service
         .get_folder_previews(paths, limit_per_folder)
         .await;
-    Json(json!({
-        "items": result.items,
-        "errors": result.errors,
-    }))
+    Json(FolderPreviewBatchOutput {
+        items: result.items,
+        errors: Some(result.errors),
+    })
     .into_response()
+}
+
+async fn set_folder_favorite(
+    State(state): State<ApiState>,
+    Json(input): Json<FolderFavoriteInput>,
+) -> Response {
+    match state
+        .service
+        .set_folder_favorite(&input.path, input.favorite)
+        .await
+    {
+        Ok(saved) => Json(FolderFavoriteOutput {
+            path: saved.path,
+            favorite: saved.favorite,
+        })
+        .into_response(),
+        Err(error) => json_error(StatusCode::BAD_REQUEST, error.to_string()),
+    }
 }
 
 async fn get_media(
@@ -518,7 +533,7 @@ async fn get_thumbnail(State(state): State<ApiState>, Path(path): Path<String>) 
 
 async fn record_preview_events(
     State(state): State<ApiState>,
-    Json(input): Json<PreviewEventsInput>,
+    Json(input): Json<PreviewDiagEventsInput>,
 ) -> Response {
     match state.service.record_preview_events(input.events).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -528,7 +543,7 @@ async fn record_preview_events(
 
 async fn record_perf_events(
     State(state): State<ApiState>,
-    Json(input): Json<PerfEventsInput>,
+    Json(input): Json<PerfDiagEventsInput>,
 ) -> Response {
     match state.service.record_perf_events(input.events).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -561,6 +576,14 @@ fn parse_media_filter(input: Option<&str>) -> Result<Option<FolderMediaFilter>> 
         Some("image") => Ok(Some(FolderMediaFilter::Image)),
         Some("video") => Ok(Some(FolderMediaFilter::Video)),
         Some(_) => Err(anyhow!("kind must be image or video")),
+    }
+}
+
+fn parse_sort_order(input: Option<&str>) -> Result<FolderSortOrder> {
+    match input {
+        None | Some("") | Some("desc") => Ok(FolderSortOrder::Desc),
+        Some("asc") => Ok(FolderSortOrder::Asc),
+        Some(_) => Err(anyhow!("sort must be asc or desc")),
     }
 }
 

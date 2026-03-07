@@ -36,11 +36,7 @@ const round = (value: number) => Math.round(value * 100) / 100;
 const hasWebGpu = () =>
   typeof navigator !== "undefined" && typeof (navigator as { gpu?: unknown }).gpu !== "undefined";
 
-interface UseThemeAndPerfOptions {
-  visibleCards: number;
-}
-
-export function useThemeAndPerf({ visibleCards }: UseThemeAndPerfOptions) {
+export function useThemeAndPerf() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [manualTheme, setManualTheme] = useState(() => {
     if (typeof window === "undefined") return false;
@@ -106,10 +102,11 @@ export function useThemeAndPerf({ visibleCards }: UseThemeAndPerfOptions) {
     return () => media.removeEventListener("change", onChange);
   }, [manualTheme]);
 
-  const visibleCardsRef = useRef(visibleCards);
-  useEffect(() => {
-    visibleCardsRef.current = visibleCards;
-  }, [visibleCards]);
+  const visibleCardsRef = useRef(0);
+
+  const reportVisibleCards = useCallback((count: number) => {
+    visibleCardsRef.current = count;
+  }, []);
 
   useEffect(() => {
     let rafId = 0;
@@ -188,5 +185,6 @@ export function useThemeAndPerf({ visibleCards }: UseThemeAndPerfOptions) {
     effectsEnabled,
     autoEffectsDisabled,
     perfNotice,
+    reportVisibleCards,
   };
 }

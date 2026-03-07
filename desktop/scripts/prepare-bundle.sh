@@ -29,7 +29,6 @@ echo "[1/4] Building Rust backend binary (macOS arm64)..."
 echo "[2/4] Copying Rust backend binary..."
 cp "$BACKEND_DIR/target/aarch64-apple-darwin/release/tmv-backend-app" "$BACKEND_OUT"
 chmod +x "$BACKEND_OUT"
-rm -f "$TAURI_DIR/binaries/media-viewer-server-aarch64-apple-darwin"
 
 echo "[3/4] Preparing Rust-only bundle resources..."
 
