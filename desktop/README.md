@@ -15,3 +15,5 @@ npm run build:dmg
 ```
 
 `prepare:bundle` builds the Rust backend from `../backend-rs` and copies the release binary into `src-tauri/binaries/`.
+
+The desktop bundle does not require a separately installed `ffmpeg`. Image and GIF thumbnails are generated inside the Rust backend, and macOS video thumbnails use AVFoundation.

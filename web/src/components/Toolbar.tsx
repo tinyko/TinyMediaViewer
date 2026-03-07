@@ -148,6 +148,7 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
           <input
             type="search"
             placeholder="筛选账号名称..."
+            aria-label="筛选账号名称"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             className="search-input"

@@ -52,8 +52,6 @@ struct Cli {
     max_items_per_folder: Option<usize>,
     #[arg(long)]
     stat_concurrency: Option<usize>,
-    #[arg(long)]
-    ffmpeg_bin: Option<String>,
     #[arg(long, value_enum)]
     runtime_mode: Option<RuntimeModeCli>,
     #[arg(long, value_enum)]
@@ -150,11 +148,6 @@ async fn main() -> Result<()> {
         .or_else(|| env_usize("TMV_STAT_CONCURRENCY"))
         .or_else(|| env_usize("STAT_CONCURRENCY"))
         .unwrap_or(24);
-    let ffmpeg_bin = cli
-        .ffmpeg_bin
-        .or_else(|| env_string("TMV_FFMPEG_BIN"))
-        .or_else(|| env_string("FFMPEG_BIN"))
-        .unwrap_or_else(|| "ffmpeg".to_string());
     let enable_light_root_mode = cli
         .enable_light_root_mode
         .or_else(|| env_bool("TMV_ENABLE_LIGHT_ROOT_MODE"))
@@ -183,7 +176,6 @@ async fn main() -> Result<()> {
     let backend = BackendService::new(
         BackendConfig {
             media_root,
-            ffmpeg_bin,
             preview_limit,
             preview_batch_limit,
             folder_page_limit,

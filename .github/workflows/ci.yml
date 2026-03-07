@@ -43,6 +43,41 @@ jobs:
       - name: Verify Generated Contracts
         run: cargo run -p tmv-contract-export -- --check
 
+  backend-macos:
+    name: Rust Backend (macOS)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: backend-rs
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend-rs
+
+      - name: Format Check
+        run: cargo fmt --check
+
+      - name: Workspace Check
+        run: cargo check --workspace
+
+      - name: Workspace Test
+        run: cargo test --workspace
+
+      - name: Build Backend App
+        run: cargo build -p tmv-backend-app
+
+      - name: Verify Generated Contracts
+        run: cargo run -p tmv-contract-export -- --check
+
   web:
     name: Web Lint/Test/Build
     runs-on: ubuntu-latest

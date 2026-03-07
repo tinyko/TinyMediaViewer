@@ -675,6 +675,22 @@ a,
   background: var(--overlay-panel);
 }
 
+.media-card__fallback {
+  width: 100%;
+  height: 160px;
+  border-radius: 10px;
+  background:
+    linear-gradient(135deg, rgba(37, 99, 235, 0.14), rgba(244, 114, 182, 0.12)),
+    var(--overlay-panel);
+  border: 1px dashed var(--border);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+  padding: 12px;
+}
+
 .media-card.heart-beat {
   animation: cardBeat 0.7s ease-out;
   border-color: var(--heart-border, var(--accent));

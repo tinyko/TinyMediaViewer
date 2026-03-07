@@ -1,5 +1,5 @@
 import { createRef } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MediaGrid } from "./MediaGrid";
 
 const videoItem = {
@@ -23,6 +23,14 @@ const imageItem = {
 };
 
 describe("MediaGrid", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders video thumbnails first and falls back to video on image load failure", () => {
     render(
       <MediaGrid
@@ -47,6 +55,89 @@ describe("MediaGrid", () => {
     const video = document.querySelector("video");
     expect(video).not.toBeNull();
     expect(video?.getAttribute("src")).toContain("/media/account/clip.mp4#t=0.001");
+  });
+
+  it("waits for scroll settling before creating a fallback video element", () => {
+    const scrollElement = document.createElement("div");
+    const scrollRef = { current: scrollElement };
+
+    render(
+      <MediaGrid
+        items={[videoItem]}
+        totalFilteredCount={1}
+        hasMore={false}
+        loadingMore={false}
+        categoryPath="account"
+        scrollRef={scrollRef}
+        hoveredCardRef={createRef<HTMLButtonElement>()}
+        onSelect={() => undefined}
+        onReachEnd={() => undefined}
+        onVisibleCardsChange={() => undefined}
+      />
+    );
+
+    fireEvent.scroll(scrollElement);
+    fireEvent.error(screen.getByAltText("clip.mp4"));
+
+    expect(document.querySelector("video")).toBeNull();
+    expect(screen.getByLabelText("clip.mp4 视频预览占位")).toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+
+    const video = document.querySelector("video");
+    expect(video).not.toBeNull();
+    expect(video?.getAttribute("src")).toContain("/media/account/clip.mp4#t=0.001");
+  });
+
+  it("resets thumbnail failure state when a virtualized slot receives a different video item", () => {
+    const { rerender } = render(
+      <MediaGrid
+        items={[videoItem]}
+        totalFilteredCount={1}
+        hasMore={false}
+        loadingMore={false}
+        categoryPath="account"
+        scrollRef={createRef<HTMLDivElement>()}
+        hoveredCardRef={createRef<HTMLButtonElement>()}
+        onSelect={() => undefined}
+        onReachEnd={() => undefined}
+        onVisibleCardsChange={() => undefined}
+      />
+    );
+
+    fireEvent.error(screen.getByAltText("clip.mp4"));
+    expect(document.querySelector("video")).not.toBeNull();
+
+    rerender(
+      <MediaGrid
+        items={[
+          {
+            ...videoItem,
+            name: "clip-2.mp4",
+            path: "account/clip-2.mp4",
+            url: "/media/account/clip-2.mp4",
+            thumbnailUrl: "/thumb/account/clip-2.mp4?m=456",
+          },
+        ]}
+        totalFilteredCount={1}
+        hasMore={false}
+        loadingMore={false}
+        categoryPath="account"
+        scrollRef={createRef<HTMLDivElement>()}
+        hoveredCardRef={createRef<HTMLButtonElement>()}
+        onSelect={() => undefined}
+        onReachEnd={() => undefined}
+        onVisibleCardsChange={() => undefined}
+      />
+    );
+
+    expect(document.querySelector("video")).toBeNull();
+    expect(screen.getByAltText("clip-2.mp4")).toHaveAttribute(
+      "src",
+      "/thumb/account/clip-2.mp4?m=456"
+    );
   });
 
   it("renders image thumbnails first and falls back to the original image on failure", () => {

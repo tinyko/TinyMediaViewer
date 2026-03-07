@@ -1,12 +1,4 @@
-import {
-  memo,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type RefObject,
-  type SyntheticEvent,
-} from "react";
+import { memo, useEffect, useMemo, useRef, useState, type RefObject, type SyntheticEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { MediaItem } from "../types";
 import { formatBytes, formatDate } from "../utils";
@@ -15,6 +7,7 @@ const GRID_GAP = 12;
 const CARD_MIN_WIDTH = 220;
 const ROW_ESTIMATE = 280;
 const FALLBACK_RENDER_LIMIT = 80;
+const VIDEO_FALLBACK_SETTLE_MS = 140;
 
 interface MediaGridProps {
   items: MediaItem[];
@@ -33,6 +26,7 @@ interface MediaCardProps {
   item: MediaItem;
   categoryPath: string | null;
   hoveredCardRef: RefObject<HTMLButtonElement | null>;
+  allowVideoFallback: boolean;
   onSelect: (item: MediaItem) => void;
 }
 
@@ -40,9 +34,11 @@ const MediaCard = memo(function MediaCard({
   item,
   categoryPath,
   hoveredCardRef,
+  allowVideoFallback,
   onSelect,
 }: MediaCardProps) {
-  const [failedThumbnailUrl, setFailedThumbnailUrl] = useState<string | null>(null);
+  const [failedThumbnailAssetKey, setFailedThumbnailAssetKey] = useState<string | null>(null);
+  const thumbnailAssetKey = item.thumbnailUrl ? `${item.path}|${item.thumbnailUrl}` : null;
 
   const handleVideoLoadedMetadata = (event: SyntheticEvent<HTMLVideoElement>) => {
     const video = event.currentTarget;
@@ -59,8 +55,11 @@ const MediaCard = memo(function MediaCard({
     }
   };
 
-  const isThumbnailFailed = Boolean(item.thumbnailUrl && failedThumbnailUrl === item.thumbnailUrl);
-  const showVideoElement = item.kind === "video" && (!item.thumbnailUrl || isThumbnailFailed);
+  const isThumbnailFailed = Boolean(
+    thumbnailAssetKey && failedThumbnailAssetKey === thumbnailAssetKey
+  );
+  const shouldFallbackToVideo = item.kind === "video" && (!item.thumbnailUrl || isThumbnailFailed);
+  const showVideoElement = shouldFallbackToVideo && allowVideoFallback;
   const imageSrc = !isThumbnailFailed && item.thumbnailUrl ? item.thumbnailUrl : item.url;
 
   return (
@@ -86,6 +85,10 @@ const MediaCard = memo(function MediaCard({
           src={`${item.url}#t=0.001`}
           onLoadedMetadata={handleVideoLoadedMetadata}
         />
+      ) : shouldFallbackToVideo ? (
+        <div className="media-card__fallback" aria-label={`${item.name} 视频预览占位`}>
+          <span>视频预览准备中</span>
+        </div>
       ) : (
         <img
           src={imageSrc}
@@ -93,8 +96,8 @@ const MediaCard = memo(function MediaCard({
           loading="lazy"
           decoding="async"
           onError={() => {
-            if (item.thumbnailUrl) {
-              setFailedThumbnailUrl(item.thumbnailUrl);
+            if (thumbnailAssetKey) {
+              setFailedThumbnailAssetKey(thumbnailAssetKey);
             }
           }}
         />
@@ -125,6 +128,7 @@ export function MediaGrid({
 }: MediaGridProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [hostWidth, setHostWidth] = useState(960);
+  const [allowVideoFallback, setAllowVideoFallback] = useState(true);
 
   useEffect(() => {
     const node = hostRef.current;
@@ -163,6 +167,30 @@ export function MediaGrid({
     [items]
   );
   const hasVirtualRows = virtualRows.length > 0;
+
+  useEffect(() => {
+    const scrollElement = scrollRef.current;
+    if (!scrollElement) return;
+
+    let settleTimer = 0;
+    const onScroll = () => {
+      setAllowVideoFallback(false);
+      if (settleTimer) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        setAllowVideoFallback(true);
+      }, VIDEO_FALLBACK_SETTLE_MS);
+    };
+
+    scrollElement.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      scrollElement.removeEventListener("scroll", onScroll);
+      if (settleTimer) {
+        window.clearTimeout(settleTimer);
+      }
+    };
+  }, [scrollRef]);
 
   useEffect(() => {
     const visibleCount = hasVirtualRows
@@ -207,6 +235,7 @@ export function MediaGrid({
                         item={item}
                         categoryPath={categoryPath}
                         hoveredCardRef={hoveredCardRef}
+                        allowVideoFallback={allowVideoFallback}
                         onSelect={onSelect}
                       />
                     ))}
@@ -222,6 +251,7 @@ export function MediaGrid({
                   item={item}
                   categoryPath={categoryPath}
                   hoveredCardRef={hoveredCardRef}
+                  allowVideoFallback={allowVideoFallback}
                   onSelect={onSelect}
                 />
               ))}

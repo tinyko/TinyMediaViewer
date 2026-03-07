@@ -9,17 +9,20 @@ use std::{
     fs::Metadata,
     path::{Component, Path, PathBuf},
     sync::{Arc, Mutex},
+    thread,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tmv_backend_index::{IndexStore, PersistedMediaRecord, SaveManifestInput};
+use tmv_backend_index::{
+    IndexStore, PersistedMediaRecord, PersistedThumbnailJobRecord, SaveManifestInput,
+};
 use tmv_backend_watch::WatchRegistry;
 use tokio::{
     fs,
-    process::Command,
-    sync::{mpsc, Semaphore},
+    sync::{mpsc, Notify, Semaphore},
 };
 
 mod contracts;
+mod thumbnail;
 
 pub use contracts::{
     EffectsMode, EffectsRenderer, FolderCounts, FolderFavoriteInput, FolderFavoriteOutput,
@@ -28,9 +31,12 @@ pub use contracts::{
     MediaItem, MediaKind, PerfDiagEvent, PerfDiagEventsInput, PreviewDiagEvent,
     PreviewDiagEventsInput, PreviewDiagPhase,
 };
+pub use thumbnail::ThumbnailError;
+use thumbnail::{default_thumbnail_generator, ThumbnailGenerator};
 
 const IMAGE_THUMBNAIL_MIN_BYTES: u64 = 512 * 1024;
 const PREVIEW_RESTORE_LIMIT: usize = 64;
+const THUMBNAIL_FAILURE_TTL_MS: u64 = 60_000;
 const ENCODE_URI_COMPONENT_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -60,7 +66,6 @@ const ENCODE_URI_COMPONENT_SET: &AsciiSet = &CONTROLS
 #[derive(Debug, Clone)]
 pub struct BackendConfig {
     pub media_root: PathBuf,
-    pub ffmpeg_bin: String,
     pub preview_limit: usize,
     pub preview_batch_limit: usize,
     pub folder_page_limit: usize,
@@ -252,6 +257,40 @@ struct ScannerCaches {
     generations: HashMap<String, u64>,
 }
 
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct ThumbnailRequestKey {
+    relative_path: String,
+    modified_ms: i64,
+}
+
+impl ThumbnailRequestKey {
+    fn new(relative_path: &str, modified_ms: i64) -> Self {
+        Self {
+            relative_path: relative_path.to_string(),
+            modified_ms,
+        }
+    }
+}
+
+type ThumbnailTaskResult = std::result::Result<PathBuf, ThumbnailError>;
+
+#[derive(Debug, Default)]
+struct ThumbnailTaskState {
+    notify: Notify,
+    result: Mutex<Option<ThumbnailTaskResult>>,
+}
+
+#[derive(Debug, Clone)]
+struct ThumbnailFailureEntry {
+    error: ThumbnailError,
+    failed_at_ms: u64,
+}
+
+enum ThumbnailTaskSlot {
+    Leader(Arc<ThumbnailTaskState>),
+    Follower(Arc<ThumbnailTaskState>),
+}
+
 #[derive(Clone)]
 pub struct DiagnosticsWriter {
     dir: Arc<PathBuf>,
@@ -340,6 +379,9 @@ pub struct BackendService {
     manifest_validations: Arc<Mutex<HashSet<String>>>,
     watch_registry: Arc<WatchRegistry>,
     thumbnail_semaphore: Arc<Semaphore>,
+    thumbnail_inflight: Arc<Mutex<HashMap<ThumbnailRequestKey, Arc<ThumbnailTaskState>>>>,
+    thumbnail_failures: Arc<Mutex<HashMap<ThumbnailRequestKey, ThumbnailFailureEntry>>>,
+    thumbnail_generator: Arc<dyn ThumbnailGenerator>,
 }
 
 impl BackendService {
@@ -347,6 +389,21 @@ impl BackendService {
         config: BackendConfig,
         index: IndexStore,
         diagnostics: DiagnosticsWriter,
+    ) -> Result<Self> {
+        Self::new_with_thumbnail_generator(
+            config,
+            index,
+            diagnostics,
+            default_thumbnail_generator(),
+        )
+        .await
+    }
+
+    async fn new_with_thumbnail_generator(
+        config: BackendConfig,
+        index: IndexStore,
+        diagnostics: DiagnosticsWriter,
+        thumbnail_generator: Arc<dyn ThumbnailGenerator>,
     ) -> Result<Self> {
         let root_real = fs::canonicalize(&config.media_root)
             .await
@@ -380,7 +437,10 @@ impl BackendService {
             caches,
             manifest_validations: Arc::new(Mutex::new(HashSet::new())),
             watch_registry: Arc::new(watch_registry),
-            thumbnail_semaphore: Arc::new(Semaphore::new(1)),
+            thumbnail_semaphore: Arc::new(Semaphore::new(thumbnail_worker_limit())),
+            thumbnail_inflight: Arc::new(Mutex::new(HashMap::new())),
+            thumbnail_failures: Arc::new(Mutex::new(HashMap::new())),
+            thumbnail_generator,
         };
         service
             .index
@@ -394,6 +454,16 @@ impl BackendService {
             )
             .await?;
         Ok(service)
+    }
+
+    #[cfg(test)]
+    async fn new_for_tests(
+        config: BackendConfig,
+        index: IndexStore,
+        diagnostics: DiagnosticsWriter,
+        thumbnail_generator: Arc<dyn ThumbnailGenerator>,
+    ) -> Result<Self> {
+        Self::new_with_thumbnail_generator(config, index, diagnostics, thumbnail_generator).await
     }
 
     pub async fn get_folder(
@@ -523,27 +593,170 @@ impl BackendService {
         })
     }
 
-    pub async fn get_thumbnail_path(
+    async fn lookup_cached_thumbnail_path(
         &self,
-        relative_path: &str,
-        absolute_path: &Path,
-        modified_ms: i64,
-        kind: MediaKind,
-    ) -> Result<PathBuf> {
-        if let Some(cached) = self
+        request: &ThumbnailRequestKey,
+    ) -> std::result::Result<Option<PathBuf>, ThumbnailError> {
+        let Some(cached) = self
             .index
-            .load_thumbnail_asset(relative_path.to_string(), modified_ms)
-            .await?
-        {
-            let cached_path = PathBuf::from(&cached);
-            if fs::metadata(&cached_path).await.is_ok() {
-                return Ok(cached_path);
-            }
+            .load_thumbnail_asset(request.relative_path.clone(), request.modified_ms)
+            .await
+            .map_err(|error| ThumbnailError::Io(format!("load cached thumbnail asset: {error}")))?
+        else {
+            return Ok(None);
+        };
+
+        let cached_path = PathBuf::from(&cached);
+        if fs::metadata(&cached_path).await.is_ok() {
+            return Ok(Some(cached_path));
         }
 
-        let _permit = self.thumbnail_semaphore.acquire().await?;
-        fs::create_dir_all(&self.config.thumbnail_cache_dir).await?;
-        let digest = sha1_hex(relative_path.as_bytes());
+        Ok(None)
+    }
+
+    fn remember_thumbnail_failure(&self, request: &ThumbnailRequestKey, error: ThumbnailError) {
+        let mut failures = self
+            .thumbnail_failures
+            .lock()
+            .expect("thumbnail failures poisoned");
+        let now = now_ms_u64();
+        failures
+            .retain(|_, entry| now.saturating_sub(entry.failed_at_ms) <= THUMBNAIL_FAILURE_TTL_MS);
+        failures.insert(
+            request.clone(),
+            ThumbnailFailureEntry {
+                error,
+                failed_at_ms: now,
+            },
+        );
+    }
+
+    fn clear_thumbnail_failure(&self, request: &ThumbnailRequestKey) {
+        let mut failures = self
+            .thumbnail_failures
+            .lock()
+            .expect("thumbnail failures poisoned");
+        failures.remove(request);
+    }
+
+    fn recent_thumbnail_failure_error(
+        &self,
+        request: &ThumbnailRequestKey,
+    ) -> Option<ThumbnailError> {
+        let mut failures = self
+            .thumbnail_failures
+            .lock()
+            .expect("thumbnail failures poisoned");
+        let now = now_ms_u64();
+        failures
+            .retain(|_, entry| now.saturating_sub(entry.failed_at_ms) <= THUMBNAIL_FAILURE_TTL_MS);
+        failures.get(request).map(|entry| entry.error.clone())
+    }
+
+    async fn load_recent_thumbnail_failure(
+        &self,
+        request: &ThumbnailRequestKey,
+    ) -> std::result::Result<Option<ThumbnailError>, ThumbnailError> {
+        if let Some(error) = self.recent_thumbnail_failure_error(request) {
+            return Ok(Some(error));
+        }
+
+        let Some(job) = self
+            .index
+            .load_thumbnail_job(request.relative_path.clone(), request.modified_ms)
+            .await
+            .map_err(|error| ThumbnailError::Io(format!("load cached thumbnail job: {error}")))?
+        else {
+            return Ok(None);
+        };
+
+        if let Some(error) = thumbnail_job_error_if_recent(&job) {
+            let error = ThumbnailError::from_persisted(error);
+            self.remember_thumbnail_failure(request, error.clone());
+            return Ok(Some(error));
+        }
+
+        Ok(None)
+    }
+
+    fn start_thumbnail_task(&self, request: &ThumbnailRequestKey) -> ThumbnailTaskSlot {
+        let mut inflight = self
+            .thumbnail_inflight
+            .lock()
+            .expect("thumbnail inflight map poisoned");
+        if let Some(state) = inflight.get(request) {
+            return ThumbnailTaskSlot::Follower(state.clone());
+        }
+
+        let state = Arc::new(ThumbnailTaskState::default());
+        inflight.insert(request.clone(), state.clone());
+        ThumbnailTaskSlot::Leader(state)
+    }
+
+    fn finish_thumbnail_task(
+        &self,
+        request: &ThumbnailRequestKey,
+        state: &Arc<ThumbnailTaskState>,
+        result: ThumbnailTaskResult,
+    ) -> ThumbnailTaskResult {
+        {
+            let mut slot = state.result.lock().expect("thumbnail task result poisoned");
+            *slot = Some(result.clone());
+        }
+        let mut inflight = self
+            .thumbnail_inflight
+            .lock()
+            .expect("thumbnail inflight map poisoned");
+        inflight.remove(request);
+        state.notify.notify_waiters();
+        result
+    }
+
+    async fn wait_for_thumbnail_task(
+        state: Arc<ThumbnailTaskState>,
+    ) -> std::result::Result<PathBuf, ThumbnailError> {
+        loop {
+            let notified = state.notify.notified();
+            if let Some(result) = state
+                .result
+                .lock()
+                .expect("thumbnail task result poisoned")
+                .clone()
+            {
+                return result;
+            }
+            notified.await;
+        }
+    }
+
+    async fn generate_thumbnail_path(
+        &self,
+        request: &ThumbnailRequestKey,
+        absolute_path: &Path,
+        kind: MediaKind,
+    ) -> std::result::Result<PathBuf, ThumbnailError> {
+        if let Some(cached) = self.lookup_cached_thumbnail_path(request).await? {
+            self.clear_thumbnail_failure(request);
+            return Ok(cached);
+        }
+
+        let _permit = self.thumbnail_semaphore.acquire().await.map_err(|error| {
+            ThumbnailError::Io(format!("acquire thumbnail worker permit: {error}"))
+        })?;
+        if let Some(cached) = self.lookup_cached_thumbnail_path(request).await? {
+            self.clear_thumbnail_failure(request);
+            return Ok(cached);
+        }
+
+        fs::create_dir_all(&self.config.thumbnail_cache_dir)
+            .await
+            .map_err(|error| {
+                ThumbnailError::Io(format!(
+                    "create thumbnail cache dir {}: {error}",
+                    self.config.thumbnail_cache_dir.display()
+                ))
+            })?;
+        let digest = sha1_hex(request.relative_path.as_bytes());
         let output_path = self
             .config
             .thumbnail_cache_dir
@@ -556,65 +769,107 @@ impl BackendService {
 
         self.index
             .save_thumbnail_job(
-                relative_path.to_string(),
-                modified_ms,
+                request.relative_path.clone(),
+                request.modified_ms,
                 "running".to_string(),
                 None,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                ThumbnailError::Io(format!("persist running thumbnail job: {error}"))
+            })?;
 
-        let mut cmd = Command::new(&self.config.ffmpeg_bin);
-        cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-threads", "1"]);
-        if matches!(kind, MediaKind::Video | MediaKind::Gif) {
-            cmd.args(["-ss", "0.1"]);
+        let generator = self.thumbnail_generator.clone();
+        let source_path = absolute_path.to_path_buf();
+        let generated =
+            tokio::task::spawn_blocking(move || generator.generate_jpeg(source_path, kind))
+                .await
+                .map_err(|error| {
+                    ThumbnailError::Io(format!("join thumbnail generation task: {error}"))
+                })?;
+        let bytes = match generated {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let message = error.to_string();
+                self.index
+                    .save_thumbnail_job(
+                        request.relative_path.clone(),
+                        request.modified_ms,
+                        "error".to_string(),
+                        Some(message.clone()),
+                    )
+                    .await
+                    .map_err(|save_error| {
+                        ThumbnailError::Io(format!("persist thumbnail job failure: {save_error}"))
+                    })?;
+                self.remember_thumbnail_failure(request, error.clone());
+                return Err(error);
+            }
+        };
+
+        fs::write(&temp_path, bytes).await.map_err(|error| {
+            ThumbnailError::Io(format!(
+                "write thumbnail temp file {}: {error}",
+                temp_path.display()
+            ))
+        })?;
+
+        if let Err(error) = fs::rename(&temp_path, &output_path).await {
+            let _ = fs::remove_file(&temp_path).await;
+            return Err(ThumbnailError::Io(format!(
+                "rename thumbnail {} -> {}: {error}",
+                temp_path.display(),
+                output_path.display()
+            )));
         }
-        cmd.arg("-i")
-            .arg(absolute_path)
-            .args([
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale=640:-2:force_original_aspect_ratio=decrease",
-                "-q:v",
-                "4",
-            ])
-            .arg(&temp_path);
-
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            self.index
-                .save_thumbnail_job(
-                    relative_path.to_string(),
-                    modified_ms,
-                    "error".to_string(),
-                    Some(stderr.clone()),
-                )
-                .await?;
-            return Err(anyhow!(if stderr.is_empty() {
-                "Thumbnail generation failed".to_string()
-            } else {
-                stderr
-            }));
-        }
-
-        fs::rename(&temp_path, &output_path).await?;
         self.index
             .save_thumbnail_asset(
-                relative_path.to_string(),
-                modified_ms,
+                request.relative_path.clone(),
+                request.modified_ms,
                 output_path.to_string_lossy().to_string(),
             )
-            .await?;
+            .await
+            .map_err(|error| ThumbnailError::Io(format!("persist thumbnail asset: {error}")))?;
         self.index
             .save_thumbnail_job(
-                relative_path.to_string(),
-                modified_ms,
+                request.relative_path.clone(),
+                request.modified_ms,
                 "ready".to_string(),
                 None,
             )
-            .await?;
+            .await
+            .map_err(|error| ThumbnailError::Io(format!("persist ready thumbnail job: {error}")))?;
+        self.clear_thumbnail_failure(request);
         Ok(output_path)
+    }
+
+    pub async fn get_thumbnail_path(
+        &self,
+        relative_path: &str,
+        absolute_path: &Path,
+        modified_ms: i64,
+        kind: MediaKind,
+    ) -> std::result::Result<PathBuf, ThumbnailError> {
+        let request = ThumbnailRequestKey::new(relative_path, modified_ms);
+
+        if let Some(cached) = self.lookup_cached_thumbnail_path(&request).await? {
+            self.clear_thumbnail_failure(&request);
+            return Ok(cached);
+        }
+
+        if let Some(error) = self.load_recent_thumbnail_failure(&request).await? {
+            return Err(error);
+        }
+
+        match self.start_thumbnail_task(&request) {
+            ThumbnailTaskSlot::Leader(state) => {
+                let result = self
+                    .generate_thumbnail_path(&request, absolute_path, kind)
+                    .await;
+                self.finish_thumbnail_task(&request, &state, result)
+            }
+            ThumbnailTaskSlot::Follower(state) => Self::wait_for_thumbnail_task(state).await,
+        }
     }
 
     pub async fn record_preview_events(&self, events: Vec<PreviewDiagEvent>) -> Result<()> {
@@ -941,12 +1196,19 @@ impl BackendService {
             serde_json::from_str::<Vec<FolderEntryCandidate>>(&record.subfolders_json)?;
         let watched_directories =
             serde_json::from_str::<Vec<FolderEntryCandidate>>(&record.watched_dirs_json)?;
-        let mut media = match record.media_bin {
+        let mut media: Vec<MediaItem> = match record.media_bin {
             Some(media_bin) if !media_bin.is_empty() => {
                 let persisted = bincode::deserialize::<Vec<PersistedMediaBlob>>(&media_bin)?;
-                persisted.into_iter().map(MediaItem::from).collect()
+                persisted
+                    .into_iter()
+                    .map(MediaItem::from)
+                    .map(normalize_media_item_capabilities)
+                    .collect()
             }
-            _ => serde_json::from_str::<Vec<MediaItem>>(&record.media_json)?,
+            _ => serde_json::from_str::<Vec<MediaItem>>(&record.media_json)?
+                .into_iter()
+                .map(normalize_media_item_capabilities)
+                .collect(),
         };
         media.sort_by(compare_media_items_by_time_desc);
         let default_page_media_json =
@@ -1649,8 +1911,7 @@ fn build_media_item(
     modified: f64,
 ) -> MediaItem {
     let encoded = encode_path(relative_path);
-    let should_use_thumbnail =
-        matches!(kind, MediaKind::Video | MediaKind::Gif) || size >= IMAGE_THUMBNAIL_MIN_BYTES;
+    let should_use_thumbnail = should_use_thumbnail(kind, size);
     MediaItem {
         name: name.to_string(),
         path: relative_path.to_string(),
@@ -1661,6 +1922,18 @@ fn build_media_item(
         size,
         modified,
     }
+}
+
+fn should_use_thumbnail(kind: &MediaKind, size: u64) -> bool {
+    match kind {
+        MediaKind::Gif => true,
+        MediaKind::Video => cfg!(target_os = "macos"),
+        MediaKind::Image => size >= IMAGE_THUMBNAIL_MIN_BYTES,
+    }
+}
+
+fn normalize_media_item_capabilities(item: MediaItem) -> MediaItem {
+    build_media_item(&item.name, &item.path, &item.kind, item.size, item.modified)
 }
 
 fn compare_media_items_by_time_desc(left: &MediaItem, right: &MediaItem) -> std::cmp::Ordering {
@@ -2007,16 +2280,132 @@ fn now_ms_u64() -> u64 {
         .unwrap_or(0)
 }
 
+fn thumbnail_job_error_if_recent(job: &PersistedThumbnailJobRecord) -> Option<String> {
+    if job.status != "error" {
+        return None;
+    }
+
+    let updated_at = u64::try_from(job.updated_at).ok()?;
+    if now_ms_u64().saturating_sub(updated_at) > THUMBNAIL_FAILURE_TTL_MS {
+        return None;
+    }
+
+    Some(
+        job.error
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "Thumbnail generation failed".to_string()),
+    )
+}
+
+fn thumbnail_worker_limit() -> usize {
+    let available = thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(2);
+    let base = available.saturating_div(2).max(2);
+
+    #[cfg(target_os = "macos")]
+    {
+        base.min(3)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        base.min(4)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        page_media_for_filter, BackendConfig, BackendService, DiagnosticsWriter, FolderMediaFilter,
-        FolderMode, FolderSortOrder, GetFolderOptions, IndexStore, MediaItem, MediaKind,
+        modified_ms, page_media_for_filter, BackendConfig, BackendService, DiagnosticsWriter,
+        FolderMediaFilter, FolderMode, FolderSortOrder, GetFolderOptions, IndexStore, MediaItem,
+        MediaKind,
     };
+    use crate::thumbnail::{ThumbnailError, ThumbnailGenerator};
     use anyhow::Result;
+    use std::{
+        path::PathBuf,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
     use tempfile::tempdir;
     use tokio::fs;
     use tokio::time::{sleep, Duration};
+
+    fn test_backend_config(root: PathBuf, thumbs: PathBuf) -> BackendConfig {
+        BackendConfig {
+            media_root: root,
+            preview_limit: 6,
+            preview_batch_limit: 64,
+            folder_page_limit: 120,
+            max_folder_page_limit: 1000,
+            max_items_per_folder: 20_000,
+            stat_concurrency: 8,
+            thumbnail_cache_dir: thumbs,
+        }
+    }
+
+    async fn create_thumbnail_test_service(
+        root: std::path::PathBuf,
+        index: std::path::PathBuf,
+        thumbs: std::path::PathBuf,
+        diag: std::path::PathBuf,
+        thumbnail_generator: Arc<dyn ThumbnailGenerator>,
+    ) -> Result<BackendService> {
+        BackendService::new_for_tests(
+            test_backend_config(root, thumbs),
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+            thumbnail_generator,
+        )
+        .await
+    }
+
+    struct CountingThumbnailGenerator {
+        count: Arc<AtomicUsize>,
+        delay_ms: u64,
+        output: std::result::Result<Vec<u8>, ThumbnailError>,
+    }
+
+    impl ThumbnailGenerator for CountingThumbnailGenerator {
+        fn generate_jpeg(
+            &self,
+            _source_path: PathBuf,
+            _kind: MediaKind,
+        ) -> std::result::Result<Vec<u8>, ThumbnailError> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+            self.output.clone()
+        }
+    }
+
+    struct TrackingThumbnailGenerator {
+        active: Arc<AtomicUsize>,
+        max_seen: Arc<AtomicUsize>,
+        delay_ms: u64,
+        output: std::result::Result<Vec<u8>, ThumbnailError>,
+    }
+
+    impl ThumbnailGenerator for TrackingThumbnailGenerator {
+        fn generate_jpeg(
+            &self,
+            _source_path: PathBuf,
+            _kind: MediaKind,
+        ) -> std::result::Result<Vec<u8>, ThumbnailError> {
+            let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = self
+                .max_seen
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |seen| {
+                    (current > seen).then_some(current)
+                });
+            std::thread::sleep(std::time::Duration::from_millis(self.delay_ms));
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.output.clone()
+        }
+    }
 
     #[tokio::test]
     async fn scans_light_and_full_folder() -> Result<()> {
@@ -2030,17 +2419,7 @@ mod tests {
         fs::write(root.join("alpha/images/b.gif"), b"gif").await?;
 
         let service = BackendService::new(
-            BackendConfig {
-                media_root: root.clone(),
-                ffmpeg_bin: "ffmpeg".to_string(),
-                preview_limit: 6,
-                preview_batch_limit: 64,
-                folder_page_limit: 120,
-                max_folder_page_limit: 1000,
-                max_items_per_folder: 20_000,
-                stat_concurrency: 8,
-                thumbnail_cache_dir: thumbs,
-            },
+            test_backend_config(root.clone(), thumbs),
             IndexStore::new(index).await?,
             DiagnosticsWriter::new(diag).await?,
         )
@@ -2085,17 +2464,7 @@ mod tests {
         fs::write(root.join("beta/b.jpg"), b"beta").await?;
 
         let service = BackendService::new(
-            BackendConfig {
-                media_root: root.clone(),
-                ffmpeg_bin: "ffmpeg".to_string(),
-                preview_limit: 6,
-                preview_batch_limit: 64,
-                folder_page_limit: 120,
-                max_folder_page_limit: 1000,
-                max_items_per_folder: 20_000,
-                stat_concurrency: 8,
-                thumbnail_cache_dir: thumbs,
-            },
+            test_backend_config(root.clone(), thumbs),
             IndexStore::new(index).await?,
             DiagnosticsWriter::new(diag).await?,
         )
@@ -2153,17 +2522,7 @@ mod tests {
         fs::create_dir_all(root.join("beta")).await?;
 
         let service = BackendService::new(
-            BackendConfig {
-                media_root: root.clone(),
-                ffmpeg_bin: "ffmpeg".to_string(),
-                preview_limit: 6,
-                preview_batch_limit: 64,
-                folder_page_limit: 120,
-                max_folder_page_limit: 1000,
-                max_items_per_folder: 20_000,
-                stat_concurrency: 8,
-                thumbnail_cache_dir: thumbs,
-            },
+            test_backend_config(root.clone(), thumbs),
             IndexStore::new(index).await?,
             DiagnosticsWriter::new(diag).await?,
         )
@@ -2257,17 +2616,7 @@ mod tests {
         .await?;
 
         let service = BackendService::new(
-            BackendConfig {
-                media_root: root.clone(),
-                ffmpeg_bin: "ffmpeg".to_string(),
-                preview_limit: 6,
-                preview_batch_limit: 64,
-                folder_page_limit: 120,
-                max_folder_page_limit: 1000,
-                max_items_per_folder: 20_000,
-                stat_concurrency: 8,
-                thumbnail_cache_dir: thumbs,
-            },
+            test_backend_config(root.clone(), thumbs),
             IndexStore::new(index).await?,
             DiagnosticsWriter::new(diag).await?,
         )
@@ -2421,6 +2770,212 @@ mod tests {
                 "IMG_20260102_000000_02.jpg",
             ]
         );
+
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn video_items_omit_thumbnail_urls_off_macos() {
+        let item = super::build_media_item(
+            "clip.mp4",
+            "alpha/videos/clip.mp4",
+            &MediaKind::Video,
+            4_096,
+            123.0,
+        );
+
+        assert_eq!(item.thumbnail_url, None);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn video_thumbnail_requests_fail_with_platform_error_off_macos() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha/videos")).await?;
+        let media_path = root.join("alpha/videos/sample.mp4");
+        fs::write(&media_path, b"not-a-real-video").await?;
+        let service = BackendService::new(
+            test_backend_config(root, thumbs),
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+        let metadata = fs::metadata(&media_path).await?;
+
+        let error = service
+            .get_thumbnail_path(
+                "alpha/videos/sample.mp4",
+                &media_path,
+                modified_ms(&metadata) as i64,
+                MediaKind::Video,
+            )
+            .await
+            .expect_err("video thumbnails should be unavailable off macOS");
+
+        assert_eq!(error, ThumbnailError::UnsupportedVideoPlatform);
+        assert_eq!(
+            error.to_string(),
+            "video thumbnails are only supported on macOS"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deduplicates_concurrent_thumbnail_requests_for_the_same_asset() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        let count = Arc::new(AtomicUsize::new(0));
+        let generator = Arc::new(CountingThumbnailGenerator {
+            count: count.clone(),
+            delay_ms: 200,
+            output: Ok(b"jpeg".to_vec()),
+        });
+
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        let media_path = root.join("alpha/images/sample.jpg");
+        fs::write(&media_path, b"sample").await?;
+        let metadata = fs::metadata(&media_path).await?;
+        let modified_ms = modified_ms(&metadata) as i64;
+        let service = create_thumbnail_test_service(root, index, thumbs, diag, generator).await?;
+
+        let (first, second) = tokio::join!(
+            service.get_thumbnail_path(
+                "alpha/images/sample.jpg",
+                &media_path,
+                modified_ms,
+                MediaKind::Image
+            ),
+            service.get_thumbnail_path(
+                "alpha/images/sample.jpg",
+                &media_path,
+                modified_ms,
+                MediaKind::Image
+            )
+        );
+
+        let first = first?;
+        let second = second?;
+
+        assert_eq!(first, second);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn processes_multiple_distinct_thumbnail_requests_in_parallel() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_seen = Arc::new(AtomicUsize::new(0));
+        let generator = Arc::new(TrackingThumbnailGenerator {
+            active,
+            max_seen: max_seen.clone(),
+            delay_ms: 300,
+            output: Ok(b"jpeg".to_vec()),
+        });
+
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        let first_media_path = root.join("alpha/images/one.jpg");
+        let second_media_path = root.join("alpha/images/two.jpg");
+        fs::write(&first_media_path, b"one").await?;
+        fs::write(&second_media_path, b"two").await?;
+        let first_modified_ms = modified_ms(&fs::metadata(&first_media_path).await?) as i64;
+        let second_modified_ms = modified_ms(&fs::metadata(&second_media_path).await?) as i64;
+        let service = create_thumbnail_test_service(root, index, thumbs, diag, generator).await?;
+
+        let (first, second) = tokio::join!(
+            service.get_thumbnail_path(
+                "alpha/images/one.jpg",
+                &first_media_path,
+                first_modified_ms,
+                MediaKind::Image
+            ),
+            service.get_thumbnail_path(
+                "alpha/images/two.jpg",
+                &second_media_path,
+                second_modified_ms,
+                MediaKind::Image
+            )
+        );
+
+        first?;
+        second?;
+
+        assert!(
+            max_seen.load(Ordering::SeqCst) >= 2,
+            "thumbnail generation should use more than one worker"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reuses_recent_thumbnail_failures_without_rerunning_thumbnail_generation() -> Result<()>
+    {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        let count = Arc::new(AtomicUsize::new(0));
+        let generator = Arc::new(CountingThumbnailGenerator {
+            count: count.clone(),
+            delay_ms: 0,
+            output: Err(ThumbnailError::GenerationFailed("boom".to_string())),
+        });
+
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        let media_path = root.join("alpha/images/broken.jpg");
+        fs::write(&media_path, b"broken").await?;
+        let modified_ms = modified_ms(&fs::metadata(&media_path).await?) as i64;
+
+        let first_service = create_thumbnail_test_service(
+            root.clone(),
+            index.clone(),
+            thumbs.clone(),
+            diag.clone(),
+            generator.clone(),
+        )
+        .await?;
+
+        let first_error = first_service
+            .get_thumbnail_path(
+                "alpha/images/broken.jpg",
+                &media_path,
+                modified_ms,
+                MediaKind::Image,
+            )
+            .await
+            .expect_err("first generation should fail");
+        assert!(first_error.to_string().contains("boom"));
+
+        let second_service =
+            create_thumbnail_test_service(root, index, thumbs, diag, generator).await?;
+        let second_error = second_service
+            .get_thumbnail_path(
+                "alpha/images/broken.jpg",
+                &media_path,
+                modified_ms,
+                MediaKind::Image,
+            )
+            .await
+            .expect_err("recent failure should be reused");
+
+        assert!(second_error.to_string().contains("boom"));
+        assert_eq!(count.load(Ordering::SeqCst), 1);
 
         Ok(())
     }

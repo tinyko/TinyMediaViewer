@@ -22,7 +22,7 @@ use tmv_backend_core::{
     BackendService, FolderFavoriteInput, FolderFavoriteOutput, FolderIdentity, FolderMediaFilter,
     FolderMode, FolderPreview, FolderPreviewBatchOutput, FolderSnapshot, FolderSortOrder,
     FolderTotals, GetFolderOptions, MediaItem, MediaPage, PerfDiagEventsInput,
-    PreviewDiagEventsInput,
+    PreviewDiagEventsInput, ThumbnailError,
 };
 use tokio::{
     fs,
@@ -527,7 +527,7 @@ async fn get_thumbnail(State(state): State<ApiState>, Path(path): Path<String>) 
                 .into_response(),
             Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
         },
-        Err(error) => map_thumbnail_generation_error(error.to_string()),
+        Err(error) => map_thumbnail_generation_error(&error),
     }
 }
 
@@ -950,16 +950,12 @@ fn map_thumbnail_resolution_error(message: String) -> Response {
     }
 }
 
-fn map_thumbnail_generation_error(message: String) -> Response {
-    if message.contains("Unsupported media extension") {
-        json_error(StatusCode::FORBIDDEN, message)
-    } else if message.contains("Missing media file path")
-        || message.contains("Media file not found")
-        || message.contains("escapes media root")
-    {
-        json_error(StatusCode::NOT_FOUND, message)
-    } else {
-        json_error(StatusCode::INTERNAL_SERVER_ERROR, message)
+fn map_thumbnail_generation_error(error: &ThumbnailError) -> Response {
+    match error {
+        ThumbnailError::UnsupportedVideoPlatform => {
+            json_error(StatusCode::NOT_IMPLEMENTED, error.to_string())
+        }
+        _ => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
 }
 
@@ -1014,11 +1010,13 @@ pub fn normalize_legacy_origins(origins: &[String]) -> Vec<String> {
 mod tests {
     use super::{
         build_session_cookie, has_valid_session_cookie, is_origin_allowed, login_path,
-        parse_byte_range, parse_mode, sanitize_return_to, validate_basic_auth,
+        map_thumbnail_generation_error, parse_byte_range, parse_mode, sanitize_return_to,
+        validate_basic_auth,
     };
     use crate::FolderMode;
-    use axum::http::{header, HeaderMap, HeaderValue};
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    use tmv_backend_core::ThumbnailError;
 
     fn auth_headers(username: &str, password: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
@@ -1096,5 +1094,11 @@ mod tests {
             login_path(Some("//evil.example")),
             "/__tmv/login?returnTo=%2F"
         );
+    }
+
+    #[test]
+    fn unsupported_video_thumbnails_map_to_not_implemented() {
+        let response = map_thumbnail_generation_error(&ThumbnailError::UnsupportedVideoPlatform);
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
     }
 }

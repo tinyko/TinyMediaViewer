@@ -48,6 +48,13 @@ pub struct SaveManifestInput {
     pub media: Vec<PersistedMediaRecord>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PersistedThumbnailJobRecord {
+    pub status: String,
+    pub error: Option<String>,
+    pub updated_at: i64,
+}
+
 impl IndexStore {
     pub async fn new(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
@@ -319,6 +326,33 @@ impl IndexStore {
         })
         .await
         .context("join load thumbnail asset task")?
+    }
+
+    pub async fn load_thumbnail_job(
+        &self,
+        source_path: String,
+        source_modified_ms: i64,
+    ) -> Result<Option<PersistedThumbnailJobRecord>> {
+        let this = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = this.open()?;
+            conn.query_row(
+                "SELECT status, error, updated_at FROM thumbnail_job
+                 WHERE source_path = ?1 AND source_modified_ms = ?2",
+                params![source_path, source_modified_ms],
+                |row| {
+                    Ok(PersistedThumbnailJobRecord {
+                        status: row.get::<_, String>(0)?,
+                        error: row.get::<_, Option<String>>(1)?,
+                        updated_at: row.get::<_, i64>(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+        .context("join load thumbnail job task")?
     }
 
     pub async fn put_runtime_meta(&self, key: String, value: String) -> Result<()> {

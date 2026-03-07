@@ -7,15 +7,25 @@ edition.workspace = true
 anyhow.workspace = true
 bincode.workspace = true
 futures.workspace = true
+image = { version = "0.25.9", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
 percent-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 ts-rs.workspace = true
 tmv-backend-index = { path = "../tmv-backend-index" }
 tmv-backend-watch = { path = "../tmv-backend-watch" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.3", default-features = false, features = ["std"] }
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["AVAsset", "AVAssetImageGenerator", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["CFCGTypes", "std"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["CGBitmapContext", "CGColorSpace", "CGContext", "CGImage", "std"] }
+objc2-core-media = { version = "0.3.2", default-features = false, features = ["CMTime", "std"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSError", "NSString", "NSURL", "std"] }
 
 [dev-dependencies]
 tempfile.workspace = true

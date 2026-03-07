@@ -12,8 +12,7 @@ import type { MediaItem } from "./types";
 import { postFolderFavorite } from "./api";
 import { MediaPreviewModal } from "./features/preview/MediaPreviewModal";
 import { useModalNavigation } from "./features/preview/useModalNavigation";
-import { ParticleField } from "./features/effects/ParticleField";
-import { HeartPulseLayer } from "./features/effects/HeartPulseLayer";
+import { EffectsStage } from "./features/effects/EffectsStage";
 import { useRootFolder } from "./features/root/useRootFolder";
 import {
   areFolderPreviewArraysEqual,
@@ -88,6 +87,7 @@ function App() {
     effectsRenderer,
     resolvedRenderer,
     toggleRenderer,
+    reportResolvedRenderer,
     effectsEnabled,
     perfNotice,
     reportVisibleCards,
@@ -294,11 +294,12 @@ function App() {
 
   return (
     <div className="page">
-      <ParticleField enabled={effectsEnabled} cursorOffset={CURSOR_OFFSET} />
-      <HeartPulseLayer
+      <EffectsStage
         enabled={effectsEnabled}
+        requestedRenderer={effectsRenderer}
         hoveredCardRef={hoveredCardRef}
         onHueChange={onHeartHueChange}
+        onResolvedRendererChange={reportResolvedRenderer}
         cursorOffset={CURSOR_OFFSET}
         pulseOffsetY={HEART_PULSE_OFFSET_Y}
       />

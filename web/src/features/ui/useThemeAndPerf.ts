@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { postPerfDiagnostics } from "../../api";
 import type { EffectsMode, EffectsRenderer, PerfDiagEvent } from "../../types";
 
@@ -6,6 +6,7 @@ type Theme = "light" | "dark";
 
 const PERF_SAMPLE_INTERVAL_MS = 10_000;
 const AUTO_LONG_TASK_THRESHOLD = 8;
+const RENDERER_MIGRATION_KEY = "mv-effects-renderer-migrated-v1";
 
 const getInitialTheme = (): Theme => {
   if (typeof window === "undefined") return "light";
@@ -26,15 +27,18 @@ const getInitialEffectsMode = (): EffectsMode => {
 };
 
 const getInitialRenderer = (): EffectsRenderer => {
-  if (typeof window === "undefined") return "canvas2d";
+  if (typeof window === "undefined") return "webgpu";
+  if (window.localStorage.getItem(RENDERER_MIGRATION_KEY) !== "true") {
+    window.localStorage.setItem("mv-effects-renderer", "webgpu");
+    window.localStorage.setItem(RENDERER_MIGRATION_KEY, "true");
+    return "webgpu";
+  }
   const stored = window.localStorage.getItem("mv-effects-renderer");
-  return stored === "webgpu" ? "webgpu" : "canvas2d";
+  if (stored === "webgpu" || stored === "canvas2d") return stored;
+  return "webgpu";
 };
 
 const round = (value: number) => Math.round(value * 100) / 100;
-
-const hasWebGpu = () =>
-  typeof navigator !== "undefined" && typeof (navigator as { gpu?: unknown }).gpu !== "undefined";
 
 export function useThemeAndPerf() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
@@ -45,13 +49,9 @@ export function useThemeAndPerf() {
 
   const [effectsMode, setEffectsMode] = useState<EffectsMode>(getInitialEffectsMode);
   const [effectsRenderer, setEffectsRenderer] = useState<EffectsRenderer>(getInitialRenderer);
+  const [resolvedRenderer, setResolvedRenderer] = useState<EffectsRenderer>(getInitialRenderer);
   const [autoEffectsDisabled, setAutoEffectsDisabled] = useState(false);
   const [perfNotice, setPerfNotice] = useState<string | null>(null);
-
-  const resolvedRenderer = useMemo<EffectsRenderer>(() => {
-    if (effectsRenderer === "webgpu" && hasWebGpu()) return "webgpu";
-    return "canvas2d";
-  }, [effectsRenderer]);
 
   const effectsEnabled =
     effectsMode === "full" ? true : effectsMode === "off" ? false : !autoEffectsDisabled;
@@ -75,6 +75,10 @@ export function useThemeAndPerf() {
     setEffectsRenderer((previous) => (previous === "canvas2d" ? "webgpu" : "canvas2d"));
   }, []);
 
+  const reportResolvedRenderer = useCallback((renderer: EffectsRenderer) => {
+    setResolvedRenderer((previous) => (previous === renderer ? previous : renderer));
+  }, []);
+
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
@@ -90,6 +94,10 @@ export function useThemeAndPerf() {
 
   useEffect(() => {
     window.localStorage.setItem("mv-effects-renderer", effectsRenderer);
+  }, [effectsRenderer]);
+
+  useEffect(() => {
+    setResolvedRenderer(effectsRenderer);
   }, [effectsRenderer]);
 
   useEffect(() => {
@@ -182,6 +190,7 @@ export function useThemeAndPerf() {
     effectsRenderer,
     resolvedRenderer,
     toggleRenderer,
+    reportResolvedRenderer,
     effectsEnabled,
     autoEffectsDisabled,
     perfNotice,
