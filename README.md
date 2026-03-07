@@ -17,7 +17,6 @@
 - 前后端契约由 Rust DTO 生成 TypeScript 文件，前端不再依赖旧的 `shared-types` 包。
 - 桌面端和开发态都只走 Rust backend，不再依赖旧的 Node/Fastify 服务链路。
 - 缩略图链路不再依赖 `ffmpeg`：图片和 GIF 首帧由 Rust 本地生成，macOS 上的视频缩略图走 AVFoundation；视频缩略图按 `/thumb/*` 请求懒生成并缓存到文件系统和 SQLite。
-- macOS 视频缩略图不是只截首帧，而是按 `100ms -> 2s -> 5s -> 10s` 多时间点探测；遇到黑场帧会自动后移，尽量避开开头黑屏。
 
 ## 仓库结构
 - `backend-rs/`
