@@ -1,3 +1,4 @@
+import type { RootAccountSortMode } from "../features/root/rootStore";
 import { memo } from "react";
 import type { EffectsMode } from "../types";
 
@@ -19,15 +20,17 @@ interface ToolbarProps {
   onReauthenticate: () => void;
   refreshing: boolean;
   onRefresh: () => void;
-  sortMode: "time" | "name" | "favorite";
-  setSortMode: (mode: "time" | "name" | "favorite") => void;
+  sortMode: RootAccountSortMode;
+  setSortMode: (mode: RootAccountSortMode) => void;
+  onRandomizeAccounts: () => void;
   search: string;
   setSearch: (value: string) => void;
   filteredCount: number;
   totalMedia: number;
   meterPercent: number;
-  mediaSort: "asc" | "desc";
-  setMediaSort: (value: "asc" | "desc") => void;
+  mediaSort: "asc" | "desc" | "random";
+  setMediaSort: (value: "asc" | "desc" | "random") => void;
+  onRandomizeMedia: () => void;
   mediaFilter: "image" | "video";
   setMediaFilter: (value: "image" | "video") => void;
 }
@@ -57,6 +60,7 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
     onRefresh,
     sortMode,
     setSortMode,
+    onRandomizeAccounts,
     search,
     setSearch,
     filteredCount,
@@ -64,6 +68,7 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
     meterPercent,
     mediaSort,
     setMediaSort,
+    onRandomizeMedia,
     mediaFilter,
     setMediaFilter,
   } = props;
@@ -115,11 +120,17 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
 
       <div className="controls condensed">
         <div className="controls__actions wide">
-          <div className="toggle-switch mini triple sort-toggle">
+          <div className="toggle-switch mini quad sort-toggle">
             <div
               className="toggle-indicator"
               data-index={
-                sortMode === "time" ? "0" : sortMode === "name" ? "1" : "2"
+                sortMode === "time"
+                  ? "0"
+                  : sortMode === "name"
+                    ? "1"
+                    : sortMode === "favorite"
+                      ? "2"
+                      : "3"
               }
             />
             <button
@@ -142,6 +153,13 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
               aria-pressed={sortMode === "favorite"}
             >
               按收藏
+            </button>
+            <button
+              className={`toggle-option ${sortMode === "random" ? "active" : ""}`}
+              onClick={onRandomizeAccounts}
+              aria-pressed={sortMode === "random"}
+            >
+              按随机
             </button>
           </div>
 
@@ -170,8 +188,13 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
                 {filteredCount} / {totalMedia} 媒体
               </span>
             </div>
-            <div className="toggle-switch tiny">
-              <div className="toggle-indicator" data-side={mediaSort === "asc" ? "left" : "right"} />
+            <div className="toggle-switch tiny triple media-sort-toggle">
+              <div
+                className="toggle-indicator"
+                data-index={
+                  mediaSort === "asc" ? "0" : mediaSort === "desc" ? "1" : "2"
+                }
+              />
               <button
                 className={`toggle-option ${mediaSort === "asc" ? "active" : ""}`}
                 onClick={() => setMediaSort("asc")}
@@ -185,6 +208,13 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
                 aria-pressed={mediaSort === "desc"}
               >
                 按时间-
+              </button>
+              <button
+                className={`toggle-option ${mediaSort === "random" ? "active" : ""}`}
+                onClick={onRandomizeMedia}
+                aria-pressed={mediaSort === "random"}
+              >
+                按随机
               </button>
             </div>
             <div className="toggle-switch small media-toggle">

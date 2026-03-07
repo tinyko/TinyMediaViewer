@@ -1,7 +1,7 @@
 import { useMemo, useRef, useSyncExternalStore } from "react";
 import type { FolderPayload, FolderPreview } from "../../types";
 
-export type RootAccountSortMode = "time" | "name" | "favorite";
+export type RootAccountSortMode = "time" | "name" | "favorite" | "random";
 export type RootMediaFilter = "image" | "video";
 
 type RootFolderMeta = Pick<FolderPayload, "folder" | "breadcrumb" | "totals">;
@@ -43,6 +43,30 @@ const sortSubfoldersByFavorite = (items: readonly FolderPreview[]) =>
         Number(Boolean(right.favorite)) - Number(Boolean(left.favorite)) ||
         right.modified - left.modified ||
         left.name.localeCompare(right.name) ||
+        left.path.localeCompare(right.path)
+    )
+    .map((item) => item.path);
+
+const rankPathForRandomSeed = (path: string, seed: number) => {
+  let hash = (0x811c9dc5 ^ seed) >>> 0;
+  for (let index = 0; index < path.length; index += 1) {
+    hash ^= path.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+};
+
+const sortPathsByRandomSeed = (paths: readonly string[], seed: number) =>
+  [...paths]
+    .map((path, index) => ({
+      path,
+      index,
+      rank: rankPathForRandomSeed(path, seed),
+    }))
+    .sort(
+      (left, right) =>
+        left.rank - right.rank ||
+        left.index - right.index ||
         left.path.localeCompare(right.path)
     )
     .map((item) => item.path);
@@ -131,6 +155,7 @@ export const selectFilteredAccounts = (
     search: string;
     sortMode: RootAccountSortMode;
     mediaFilter: RootMediaFilter;
+    randomSeed?: number;
   }
 ) => {
   const search = options.search.trim().toLowerCase();
@@ -139,6 +164,8 @@ export const selectFilteredAccounts = (
       ? state.orderByName
       : options.sortMode === "favorite"
         ? state.orderByFavorite
+        : options.sortMode === "random"
+          ? sortPathsByRandomSeed(state.orderByModified, options.randomSeed ?? 0)
         : state.orderByModified;
   const accounts: FolderPreview[] = [];
   for (const path of order) {

@@ -15,6 +15,7 @@ import { EffectsStage } from "./features/effects/EffectsStage";
 import { useRootFolder } from "./features/root/useRootFolder";
 import {
   areFolderPreviewArraysEqual,
+  type RootAccountSortMode,
   selectCategorySummary,
   selectFilteredAccounts,
   useRootStoreSelector,
@@ -32,13 +33,16 @@ const HEART_PULSE_OFFSET_Y = 0;
 const APP_VERSION = import.meta.env.VITE_TMV_APP_VERSION ?? "0.1.0";
 const APP_SHORT_COMMIT = import.meta.env.VITE_TMV_SHORT_COMMIT ?? "dev";
 const APP_BUILD_TIME = import.meta.env.VITE_TMV_BUILD_TIME ?? "unknown";
+type MediaSortMode = "asc" | "desc" | "random";
 
 function App() {
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<MediaItem | null>(null);
   const [mediaFilter, setMediaFilter] = useState<"image" | "video">("image");
-  const [sortMode, setSortMode] = useState<"time" | "name" | "favorite">("time");
-  const [mediaSort, setMediaSort] = useState<"asc" | "desc">("desc");
+  const [sortMode, setSortMode] = useState<RootAccountSortMode>("time");
+  const [randomSeed, setRandomSeed] = useState(0);
+  const [mediaSort, setMediaSort] = useState<MediaSortMode>("desc");
+  const [mediaRandomSeed, setMediaRandomSeed] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
 
@@ -55,6 +59,7 @@ function App() {
         search: deferredSearch,
         sortMode,
         mediaFilter,
+        randomSeed,
       }),
     areFolderPreviewArraysEqual
   );
@@ -74,7 +79,7 @@ function App() {
     refreshCategory,
     loadMoreCategory,
     resetCategory,
-  } = useCategoryMedia({ rootVersion, mediaFilter, mediaSort });
+  } = useCategoryMedia({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed });
   const {
     theme,
     setTheme,
@@ -120,6 +125,20 @@ function App() {
     },
     [handleSelectCategory]
   );
+  const onSetSortMode = useCallback((mode: RootAccountSortMode) => {
+    setSortMode(mode);
+  }, []);
+  const onRandomizeAccounts = useCallback(() => {
+    setSortMode("random");
+    setRandomSeed((current) => current + 1);
+  }, []);
+  const onSetMediaSort = useCallback((value: MediaSortMode) => {
+    setMediaSort(value);
+  }, []);
+  const onRandomizeMedia = useCallback(() => {
+    setMediaSort("random");
+    setMediaRandomSeed((current) => current + 1);
+  }, []);
   const onReachEnd = useCallback(() => {
     if (categoryHasMore && !categoryLoadingMore) {
       void loadMoreCategory();
@@ -140,6 +159,7 @@ function App() {
         search: deferredSearch,
         sortMode,
         mediaFilter,
+        randomSeed,
       });
       enqueueRootPreviewPaths(refreshedAccounts.slice(0, 20).map((item) => item.path));
       await refreshCategory(
@@ -166,6 +186,7 @@ function App() {
     refreshing,
     resetRootPreviewQueue,
     rootStore,
+    randomSeed,
     sortMode,
   ]);
   const onReauthenticate = useCallback(() => {
@@ -309,14 +330,16 @@ function App() {
         refreshing={refreshing}
         onRefresh={onRefresh}
         sortMode={sortMode}
-        setSortMode={setSortMode}
+        setSortMode={onSetSortMode}
+        onRandomizeAccounts={onRandomizeAccounts}
         search={search}
         setSearch={setSearch}
         filteredCount={filteredCount}
         totalMedia={totalMedia}
         meterPercent={meterPercent}
         mediaSort={mediaSort}
-        setMediaSort={setMediaSort}
+        setMediaSort={onSetMediaSort}
+        onRandomizeMedia={onRandomizeMedia}
         mediaFilter={mediaFilter}
         setMediaFilter={setMediaFilter}
       />

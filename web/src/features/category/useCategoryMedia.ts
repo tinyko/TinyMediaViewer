@@ -2,30 +2,33 @@ import { useCallback, useMemo, useState, startTransition } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchFolder } from "../../api";
 import type { FolderPayload, MediaItem } from "../../types";
-import { mergeMediaByPath } from "./mediaUtils";
+import { mergeMediaByPath, sortMediaByRandomSeed } from "./mediaUtils";
 
 const SERVER_PAGE_SIZE = 120;
 
 type CategoryMediaFilter = "image" | "video";
-type MediaSortDirection = "asc" | "desc";
+type MediaSortMode = "asc" | "desc" | "random";
 
 interface UseCategoryMediaOptions {
   rootVersion: number;
   mediaFilter: CategoryMediaFilter;
-  mediaSort: MediaSortDirection;
+  mediaSort: MediaSortMode;
+  mediaRandomSeed: number;
 }
 
 export function useCategoryMedia({
   rootVersion,
   mediaFilter,
   mediaSort,
+  mediaRandomSeed,
 }: UseCategoryMediaOptions) {
   const queryClient = useQueryClient();
   const [categoryPath, setCategoryPath] = useState<string | null>(null);
+  const backendSort = mediaSort === "random" ? "desc" : mediaSort;
 
   const queryKey = useMemo(
-    () => ["category", categoryPath, mediaFilter, mediaSort, rootVersion],
-    [categoryPath, mediaFilter, mediaSort, rootVersion]
+    () => ["category", categoryPath, mediaFilter, backendSort, rootVersion],
+    [backendSort, categoryPath, mediaFilter, rootVersion]
   );
 
   const {
@@ -43,7 +46,7 @@ export function useCategoryMedia({
         limit: SERVER_PAGE_SIZE,
         mode: "full",
         kind: mediaFilter,
-        sort: mediaSort,
+        sort: backendSort,
         signal,
       });
       return payload;
@@ -55,9 +58,9 @@ export function useCategoryMedia({
 
   const categoryPreview = data?.pages[0]
     ? {
-      ...data.pages[0],
-      media: data.pages.flatMap((p) => p.media),
-    }
+        ...data.pages[0],
+        media: data.pages.flatMap((p) => p.media),
+      }
     : null;
 
   const categoryMedia = useMemo(() => {
@@ -66,8 +69,10 @@ export function useCategoryMedia({
     for (const page of data.pages) {
       merged = mergeMediaByPath(merged, page.media);
     }
-    return merged;
-  }, [data]);
+    return mediaSort === "random"
+      ? sortMediaByRandomSeed(merged, mediaRandomSeed)
+      : merged;
+  }, [data, mediaRandomSeed, mediaSort]);
 
   const clearCategoryState = useCallback((nextPath: string | null = null) => {
     startTransition(() => {

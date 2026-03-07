@@ -12,8 +12,10 @@
 ## 当前设计
 - 根目录列表走轻量快照，账号切换走完整分页接口和服务端分页，避免首次加载就扫描整库。
 - 左侧账号列表和右侧媒体网格都做了虚拟化；根目录数据在前端走归一化 store，预览和计数按可见账号批量回填。
-- 分类媒体请求由 React Query 管理：`useInfiniteQuery` 负责分页、缓存和失效，查询 key 按账号路径、媒体类型、排序方向和根目录版本隔离。
-- 账号行右侧支持收藏按钮，收藏状态通过 Rust backend 写入 SQLite；顶部 `按收藏` 会筛出收藏账号，不是简单排序置顶。
+- 分类媒体请求由 React Query 管理：`useInfiniteQuery` 负责分页、缓存和失效，查询 key 按账号路径、媒体类型、后端排序方向和根目录版本隔离。
+- 左侧账号列表支持 `按时间`、`按名称`、`按收藏` 和 `按随机`。`按收藏` 会筛出收藏账号；`按随机` 使用稳定 seed 打散顺序，只有再次点击按钮才会重新洗牌。
+- 账号行右侧支持收藏按钮，收藏状态通过 Rust backend 写入 SQLite 并持久化。
+- 右侧媒体网格支持 `按时间+`、`按时间-` 和 `按随机`。媒体随机顺序在前端基于当前已加载条目稳定重排，再次点击按钮才会换一组，不会为重洗牌重新拉接口。
 - 前端特效层已经收口成共享 `EffectsStage`，默认请求 `webgpu`，初始化失败时自动回退到 `canvas2d`，工具栏显示 `WG×`。
 - 前后端契约由 Rust DTO 生成 TypeScript 文件，前端不再依赖旧的 `shared-types` 包。
 - 桌面端和开发态都只走 Rust backend，不再依赖旧的 Node/Fastify 服务链路。
@@ -30,7 +32,7 @@
   - `tmv-backend-watch`: 文件系统 watch，目录变化时失效缓存。
   - `tmv-contract-export`: 从 Rust DTO 生成前端 TypeScript 契约。
 - `web/`
-  React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，分类媒体通过 React Query 分页缓存，特效层支持真实 `canvas2d/webgpu` 双分支。
+  React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，分类媒体通过 React Query 分页缓存，账号和媒体列表都支持稳定随机重排，特效层支持真实 `canvas2d/webgpu` 双分支。
 - `desktop/`
   Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包，并在打包时把当前 `git rev-parse --short HEAD` 和 UTC 构建时间注入 viewer 指纹。
 - `archive/node-legacy/`
@@ -145,5 +147,5 @@ cargo check
 
 ## 相关说明
 - `desktop/README.md` 说明桌面壳层和 DMG 打包。
-- `web/README.md` 说明 viewer 开发命令、收藏筛选、渲染器和契约生成。
+- `web/README.md` 说明 viewer 开发命令、收藏筛选、账号/媒体随机排序、渲染器和契约生成。
 - 旧的 Node 代码已迁到 `archive/node-legacy/`，不要再把 `server/` 当成主线服务入口。

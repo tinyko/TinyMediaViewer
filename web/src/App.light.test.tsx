@@ -107,6 +107,16 @@ const makeCategoryPayloadWithMedia = (
 const makeCategoryPayload = (path: string): FolderPayload =>
   makeCategoryPayloadWithMedia(path, [makeMedia("IMG_20260219_120000.jpg", "image")]);
 
+const readVisibleCategoryOrder = () =>
+  Array.from(document.querySelectorAll(".category-item__title")).map((node) =>
+    node.textContent?.trim() ?? ""
+  );
+
+const readVisibleMediaOrder = () =>
+  Array.from(document.querySelectorAll(".media-title")).map((node) =>
+    node.textContent?.trim() ?? ""
+  );
+
 describe("App root light mode + preview backfill", () => {
   beforeEach(() => {
     mockedFetchFolder.mockReset();
@@ -552,6 +562,140 @@ describe("App root light mode + preview backfill", () => {
       expect(screen.queryByText("B.jpg")).not.toBeInTheDocument();
     });
     expect(screen.queryByText("该账号暂无符合过滤条件的媒体")).not.toBeInTheDocument();
+  });
+
+  it("rerolls the account list each time random mode is clicked", async () => {
+    mockedFetchFolder.mockImplementation((targetPath = "") => {
+      if (targetPath === "") {
+        return Promise.resolve(
+          makeRootPayloadWithSubfolders([
+            {
+              name: "alpha",
+              path: "alpha",
+              modified: 400,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+              previews: [],
+              countsReady: true,
+              previewReady: true,
+              favorite: false,
+              approximate: false,
+            },
+            {
+              name: "beta",
+              path: "beta",
+              modified: 300,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+              previews: [],
+              countsReady: true,
+              previewReady: true,
+              favorite: false,
+              approximate: false,
+            },
+            {
+              name: "gamma",
+              path: "gamma",
+              modified: 200,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+              previews: [],
+              countsReady: true,
+              previewReady: true,
+              favorite: false,
+              approximate: false,
+            },
+            {
+              name: "delta",
+              path: "delta",
+              modified: 100,
+              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+              previews: [],
+              countsReady: true,
+              previewReady: true,
+              favorite: false,
+              approximate: false,
+            },
+          ])
+        );
+      }
+
+      return Promise.resolve(makeCategoryPayload(targetPath));
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    renderWithQueryClient(<App />);
+
+    expect(await screen.findByText("IMG_20260219_120000.jpg")).toBeInTheDocument();
+
+    const initialOrder = readVisibleCategoryOrder();
+    const accountRandomButton = screen.getAllByRole("button", { name: "按随机" })[0];
+
+    await userEvent.click(accountRandomButton);
+
+    await waitFor(() => {
+      expect(accountRandomButton).toHaveAttribute("aria-pressed", "true");
+      expect(readVisibleCategoryOrder()).not.toEqual(initialOrder);
+    });
+
+    const firstRandomOrder = readVisibleCategoryOrder();
+
+    await userEvent.click(accountRandomButton);
+
+    await waitFor(() => {
+      expect(readVisibleCategoryOrder()).not.toEqual(firstRandomOrder);
+    });
+
+    expect([...readVisibleCategoryOrder()].sort()).toEqual([...initialOrder].sort());
+  });
+
+  it("rerolls the visible media cards each time media random mode is clicked", async () => {
+    mockedFetchFolder.mockImplementation((targetPath = "") => {
+      if (targetPath === "") {
+        return Promise.resolve(
+          makeRootPayloadWithSubfolders([
+            {
+              ...makeLightRootPayload().subfolders[0],
+              countsReady: true,
+              previewReady: true,
+              counts: { images: 5, gifs: 0, videos: 0, subfolders: 0 },
+            },
+          ])
+        );
+      }
+
+      return Promise.resolve(
+        makeCategoryPayloadWithMedia(targetPath, [
+          makeMedia("IMG_20260307_000005.jpg", "image"),
+          makeMedia("IMG_20260307_000004.jpg", "image"),
+          makeMedia("IMG_20260307_000003.jpg", "image"),
+          makeMedia("IMG_20260307_000002.jpg", "image"),
+          makeMedia("IMG_20260307_000001.jpg", "image"),
+        ])
+      );
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    renderWithQueryClient(<App />);
+
+    expect(await screen.findByText("IMG_20260307_000005.jpg")).toBeInTheDocument();
+
+    const initialOrder = readVisibleMediaOrder();
+
+    const mediaRandomButton = screen.getAllByRole("button", { name: "按随机" }).at(-1);
+    expect(mediaRandomButton).toBeDefined();
+
+    await userEvent.click(mediaRandomButton!);
+
+    await waitFor(() => {
+      expect(mediaRandomButton!).toHaveAttribute("aria-pressed", "true");
+      expect(readVisibleMediaOrder()).not.toEqual(initialOrder);
+    });
+
+    const firstRandomOrder = readVisibleMediaOrder();
+
+    await userEvent.click(mediaRandomButton!);
+
+    await waitFor(() => {
+      expect(readVisibleMediaOrder()).not.toEqual(firstRandomOrder);
+    });
   });
 
   it("refreshes root and reloads the current category without mixing stale page data", async () => {

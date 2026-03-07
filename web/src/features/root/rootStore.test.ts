@@ -85,6 +85,34 @@ describe("rootStore", () => {
     ]);
   });
 
+  it("keeps random account ordering stable for the same seed and rerolls when the seed changes", () => {
+    const store = createRootFolderStore();
+    store.replaceRoot(makePerfRootPayload(8));
+
+    const first = selectFilteredAccounts(store.getState(), {
+      search: "",
+      sortMode: "random",
+      mediaFilter: "image",
+      randomSeed: 1,
+    }).map((item) => item.path);
+    const repeated = selectFilteredAccounts(store.getState(), {
+      search: "",
+      sortMode: "random",
+      mediaFilter: "image",
+      randomSeed: 1,
+    }).map((item) => item.path);
+    const rerolled = selectFilteredAccounts(store.getState(), {
+      search: "",
+      sortMode: "random",
+      mediaFilter: "image",
+      randomSeed: 2,
+    }).map((item) => item.path);
+
+    expect(repeated).toEqual(first);
+    expect(rerolled).not.toEqual(first);
+    expect([...rerolled].sort()).toEqual([...first].sort());
+  });
+
   it("marks failed previews without touching ready entries", () => {
     const store = createRootFolderStore();
     const payload = makePerfRootPayload(4);

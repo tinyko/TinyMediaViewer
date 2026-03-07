@@ -14,7 +14,8 @@ const mockedFetchFolder = vi.mocked(fetchFolder);
 interface HookProps {
   rootVersion: number;
   mediaFilter: "image" | "video";
-  mediaSort: "asc" | "desc";
+  mediaSort: "asc" | "desc" | "random";
+  mediaRandomSeed: number;
 }
 
 const makeCategoryPage = (
@@ -73,13 +74,14 @@ describe("useCategoryMedia", () => {
 
     const { result, rerender } = renderHook<ReturnType<typeof useCategoryMedia>, HookProps>(
       ({ rootVersion, mediaFilter, mediaSort }) =>
-        useCategoryMedia({ rootVersion, mediaFilter, mediaSort }),
+        useCategoryMedia({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed: 0 }),
       {
         wrapper: createQueryClientWrapper(),
         initialProps: {
           rootVersion: 1,
           mediaFilter: "image",
           mediaSort: "desc",
+          mediaRandomSeed: 0,
         },
       }
     );
@@ -100,6 +102,7 @@ describe("useCategoryMedia", () => {
       rootVersion: 1,
       mediaFilter: "image",
       mediaSort: "asc",
+      mediaRandomSeed: 0,
     });
 
     await waitFor(() => {
@@ -114,6 +117,7 @@ describe("useCategoryMedia", () => {
       rootVersion: 1,
       mediaFilter: "image",
       mediaSort: "desc",
+      mediaRandomSeed: 0,
     });
 
     await waitFor(() => {
@@ -171,13 +175,14 @@ describe("useCategoryMedia", () => {
 
     const { result, rerender } = renderHook<ReturnType<typeof useCategoryMedia>, HookProps>(
       ({ rootVersion, mediaFilter, mediaSort }) =>
-        useCategoryMedia({ rootVersion, mediaFilter, mediaSort }),
+        useCategoryMedia({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed: 0 }),
       {
         wrapper: createQueryClientWrapper(),
         initialProps: {
           rootVersion: 1,
           mediaFilter: "image",
           mediaSort: "desc",
+          mediaRandomSeed: 0,
         },
       }
     );
@@ -198,6 +203,7 @@ describe("useCategoryMedia", () => {
       rootVersion: 1,
       mediaFilter: "image",
       mediaSort: "asc",
+      mediaRandomSeed: 0,
     });
 
     await waitFor(() => {
@@ -212,6 +218,7 @@ describe("useCategoryMedia", () => {
       rootVersion: 1,
       mediaFilter: "video",
       mediaSort: "desc",
+      mediaRandomSeed: 0,
     });
 
     await waitFor(() => {
@@ -226,6 +233,7 @@ describe("useCategoryMedia", () => {
       rootVersion: 1,
       mediaFilter: "image",
       mediaSort: "desc",
+      mediaRandomSeed: 0,
     });
 
     await waitFor(() => {
@@ -282,6 +290,7 @@ describe("useCategoryMedia", () => {
           rootVersion: 1,
           mediaFilter: "image",
           mediaSort: "desc",
+          mediaRandomSeed: 0,
         }),
       {
         wrapper: createQueryClientWrapper(),
@@ -309,5 +318,88 @@ describe("useCategoryMedia", () => {
       ]);
       expect(result.current.categoryHasMore).toBe(false);
     });
+  });
+
+  it("rerolls media locally in random mode without refetching backend pages", async () => {
+    mockedFetchFolder.mockImplementation((path = "", options) => {
+      if (path !== "alpha") {
+        throw new Error(`Unexpected path ${path}`);
+      }
+      expect(options?.sort).toBe("desc");
+      return Promise.resolve(
+        makeCategoryPage("alpha", [
+          "IMG_20260307_000005.jpg",
+          "IMG_20260307_000004.jpg",
+          "IMG_20260307_000003.jpg",
+          "IMG_20260307_000002.jpg",
+          "IMG_20260307_000001.jpg",
+        ])
+      );
+    });
+
+    const { result, rerender } = renderHook<ReturnType<typeof useCategoryMedia>, HookProps>(
+      ({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed }) =>
+        useCategoryMedia({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed }),
+      {
+        wrapper: createQueryClientWrapper(),
+        initialProps: {
+          rootVersion: 1,
+          mediaFilter: "image",
+          mediaSort: "desc",
+          mediaRandomSeed: 0,
+        },
+      }
+    );
+
+    await act(async () => {
+      await result.current.handleSelectCategory("alpha");
+    });
+
+    await waitFor(() => {
+      expect(result.current.categoryMedia.map((item) => item.name)).toEqual([
+        "IMG_20260307_000005.jpg",
+        "IMG_20260307_000004.jpg",
+        "IMG_20260307_000003.jpg",
+        "IMG_20260307_000002.jpg",
+        "IMG_20260307_000001.jpg",
+      ]);
+    });
+
+    rerender({
+      rootVersion: 1,
+      mediaFilter: "image",
+      mediaSort: "random",
+      mediaRandomSeed: 1,
+    });
+
+    let firstRandomOrder: string[] = [];
+    await waitFor(() => {
+      firstRandomOrder = result.current.categoryMedia.map((item) => item.name);
+      expect(firstRandomOrder).not.toEqual([
+        "IMG_20260307_000005.jpg",
+        "IMG_20260307_000004.jpg",
+        "IMG_20260307_000003.jpg",
+        "IMG_20260307_000002.jpg",
+        "IMG_20260307_000001.jpg",
+      ]);
+    });
+
+    rerender({
+      rootVersion: 1,
+      mediaFilter: "image",
+      mediaSort: "random",
+      mediaRandomSeed: 2,
+    });
+
+    await waitFor(() => {
+      expect(result.current.categoryMedia.map((item) => item.name)).not.toEqual(firstRandomOrder);
+    });
+
+    expect(
+      mockedFetchFolder.mock.calls.filter(
+        ([path, options]) =>
+          path === "alpha" && options?.kind === "image" && options?.sort === "desc"
+      )
+    ).toHaveLength(1);
   });
 });

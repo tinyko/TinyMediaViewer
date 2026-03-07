@@ -69,6 +69,38 @@ export const sortMediaByTime = (
   return decorated.map(({ item }) => item);
 };
 
+const rankMediaForRandomSeed = (item: MediaItem, seed: number) => {
+  let hash = (0x811c9dc5 ^ seed) >>> 0;
+  for (let index = 0; index < item.path.length; index += 1) {
+    hash ^= item.path.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+};
+
+export const sortMediaByRandomSeed = (
+  items: MediaItem[],
+  seed: number
+) => {
+  if (items.length < 2) {
+    return items.slice();
+  }
+
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      rank: rankMediaForRandomSeed(item, seed),
+    }))
+    .sort(
+      (left, right) =>
+        left.rank - right.rank ||
+        left.index - right.index ||
+        left.item.path.localeCompare(right.item.path)
+    )
+    .map(({ item }) => item);
+};
+
 export const mergeMediaByPath = (existing: MediaItem[], incoming: MediaItem[]) => {
   const seen = new Set(existing.map((item) => item.path));
   const merged = [...existing];
