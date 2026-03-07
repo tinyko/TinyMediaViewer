@@ -1,16 +1,13 @@
 use anyhow::{Context, Result};
+use deadpool_sqlite::{Config, Hook, HookError, Pool, Runtime};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{fs, path::Path};
 
 const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone)]
 pub struct IndexStore {
-    db_path: Arc<PathBuf>,
+    pool: Pool,
 }
 
 #[derive(Debug, Clone)]
@@ -58,24 +55,51 @@ pub struct PersistedThumbnailJobRecord {
 impl IndexStore {
     pub async fn new(dir: impl AsRef<Path>) -> Result<Self> {
         let dir = dir.as_ref().to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            fs::create_dir_all(&dir)
-                .with_context(|| format!("create index dir {}", dir.display()))?;
-            let db_path = dir.join("tmv-index.sqlite3");
-            let store = Self {
-                db_path: Arc::new(db_path),
-            };
-            store.init_schema()?;
-            Ok(store)
-        })
-        .await
-        .context("join init index store task")?
+        fs::create_dir_all(&dir).with_context(|| format!("create index dir {}", dir.display()))?;
+        let db_path = dir.join("tmv-index.sqlite3");
+
+        let cfg = Config::new(db_path);
+        let pool = cfg
+            .builder(Runtime::Tokio1)
+            .expect("deadpool sqlite config is infallible")
+            .max_size(8)
+            .post_create(Hook::async_fn(|conn, _| {
+                Box::pin(async move {
+                    conn.interact(configure_connection)
+                        .await
+                        .map_err(|err| {
+                            HookError::message(format!(
+                                "sqlite connection setup task failed: {err}"
+                            ))
+                        })?
+                        .map_err(HookError::Backend)
+                })
+            }))
+            .build()
+            .context("build sqlite connection pool")?;
+
+        let store = Self { pool };
+        store
+            .interact(|conn| Self::init_schema(conn))
+            .await
+            .context("db schema init task error")?;
+
+        Ok(store)
+    }
+
+    pub async fn interact<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&mut Connection) -> Result<R> + Send + 'static,
+        R: Send + 'static,
+    {
+        let conn = self.pool.get().await.context("get db connection")?;
+        conn.interact(f)
+            .await
+            .map_err(|e| anyhow::anyhow!("db task panicked or canceled: {}", e))?
     }
 
     pub async fn save_manifest(&self, manifest: SaveManifestInput) -> Result<()> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut conn = this.open()?;
+        self.interact(move |conn| {
             let tx = conn.transaction()?;
             tx.execute(
                 "INSERT INTO folder_manifest (path, stamp, root_modified, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json, updated_at)
@@ -125,7 +149,7 @@ impl IndexStore {
             Ok(())
         })
         .await
-        .context("join save manifest task")?
+        .context("save manifest run error")
     }
 
     pub async fn load_manifest(
@@ -148,9 +172,7 @@ impl IndexStore {
         path: String,
         stamp: Option<String>,
     ) -> Result<Option<PersistedManifestRecord>> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             let row = if let Some(stamp_value) = stamp {
                 conn.query_row(
                     "SELECT path, stamp, root_modified, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json
@@ -207,7 +229,7 @@ impl IndexStore {
             }))
         })
         .await
-        .context("join load manifest task")?
+        .context("load manifest inner task error")
     }
 
     pub async fn save_preview(
@@ -217,9 +239,7 @@ impl IndexStore {
         stamp: String,
         payload_json: String,
     ) -> Result<()> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             conn.execute(
                 "INSERT INTO folder_preview_cache (path, preview_limit, stamp, payload_json, updated_at)
                  VALUES (?1, ?2, ?3, ?4, unixepoch('now') * 1000)
@@ -232,7 +252,7 @@ impl IndexStore {
             Ok(())
         })
         .await
-        .context("join save preview task")?
+        .context("save preview task error")
     }
 
     pub async fn load_preview(
@@ -241,9 +261,7 @@ impl IndexStore {
         preview_limit: i64,
         stamp: String,
     ) -> Result<Option<String>> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             conn.query_row(
                 "SELECT payload_json FROM folder_preview_cache
                  WHERE path = ?1 AND preview_limit = ?2 AND stamp = ?3",
@@ -254,7 +272,7 @@ impl IndexStore {
             .map_err(Into::into)
         })
         .await
-        .context("join load preview task")?
+        .context("load preview task error")
     }
 
     pub async fn save_thumbnail_job(
@@ -264,9 +282,7 @@ impl IndexStore {
         status: String,
         error: Option<String>,
     ) -> Result<()> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             conn.execute(
                 "INSERT INTO thumbnail_job (source_path, source_modified_ms, status, error, updated_at)
                  VALUES (?1, ?2, ?3, ?4, unixepoch('now') * 1000)
@@ -280,7 +296,7 @@ impl IndexStore {
             Ok(())
         })
         .await
-        .context("join save thumbnail job task")?
+        .context("save thumbnail job task error")
     }
 
     pub async fn save_thumbnail_asset(
@@ -289,9 +305,7 @@ impl IndexStore {
         source_modified_ms: i64,
         output_path: String,
     ) -> Result<()> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             conn.execute(
                 "INSERT INTO thumbnail_asset (source_path, source_modified_ms, output_path, updated_at)
                  VALUES (?1, ?2, ?3, unixepoch('now') * 1000)
@@ -304,7 +318,7 @@ impl IndexStore {
             Ok(())
         })
         .await
-        .context("join save thumbnail asset task")?
+        .context("save thumbnail asset task error")
     }
 
     pub async fn load_thumbnail_asset(
@@ -312,9 +326,7 @@ impl IndexStore {
         source_path: String,
         source_modified_ms: i64,
     ) -> Result<Option<String>> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             conn.query_row(
                 "SELECT output_path FROM thumbnail_asset
                  WHERE source_path = ?1 AND source_modified_ms = ?2",
@@ -325,7 +337,7 @@ impl IndexStore {
             .map_err(Into::into)
         })
         .await
-        .context("join load thumbnail asset task")?
+        .context("load thumbnail asset task error")
     }
 
     pub async fn load_thumbnail_job(
@@ -333,9 +345,7 @@ impl IndexStore {
         source_path: String,
         source_modified_ms: i64,
     ) -> Result<Option<PersistedThumbnailJobRecord>> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             conn.query_row(
                 "SELECT status, error, updated_at FROM thumbnail_job
                  WHERE source_path = ?1 AND source_modified_ms = ?2",
@@ -352,13 +362,11 @@ impl IndexStore {
             .map_err(Into::into)
         })
         .await
-        .context("join load thumbnail job task")?
+        .context("load thumbnail job task error")
     }
 
     pub async fn put_runtime_meta(&self, key: String, value: String) -> Result<()> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             conn.execute(
                 "INSERT INTO runtime_meta (key, value, updated_at)
                  VALUES (?1, ?2, unixepoch('now') * 1000)
@@ -368,13 +376,11 @@ impl IndexStore {
             Ok(())
         })
         .await
-        .context("join put runtime meta task")?
+        .context("put runtime meta task error")
     }
 
     pub async fn set_folder_favorite(&self, path: String, favorite: bool) -> Result<()> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             if favorite {
                 conn.execute(
                     "INSERT INTO folder_favorite (path, updated_at)
@@ -388,13 +394,11 @@ impl IndexStore {
             Ok(())
         })
         .await
-        .context("join set folder favorite task")?
+        .context("set folder favorite task error")
     }
 
     pub async fn is_folder_favorite(&self, path: String) -> Result<bool> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             conn.query_row(
                 "SELECT 1 FROM folder_favorite WHERE path = ?1",
                 params![path],
@@ -405,13 +409,11 @@ impl IndexStore {
             .map_err(Into::into)
         })
         .await
-        .context("join is folder favorite task")?
+        .context("is folder favorite task error")
     }
 
     pub async fn load_all_folder_favorites(&self) -> Result<Vec<String>> {
-        let this = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = this.open()?;
+        self.interact(move |conn| {
             let mut stmt = conn
                 .prepare("SELECT path FROM folder_favorite ORDER BY updated_at DESC, path ASC")?;
             let favorites = stmt
@@ -421,11 +423,10 @@ impl IndexStore {
             Ok(favorites)
         })
         .await
-        .context("join load all folder favorites task")?
+        .context("load all folder favorites task error")
     }
 
-    fn init_schema(&self) -> Result<()> {
-        let conn = self.open()?;
+    fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS folder_manifest (
@@ -483,9 +484,9 @@ impl IndexStore {
             );
             ",
         )?;
-        ensure_manifest_media_json_column(&conn)?;
-        ensure_manifest_media_bin_column(&conn)?;
-        ensure_manifest_default_page_media_json_column(&conn)?;
+        ensure_manifest_media_json_column(conn)?;
+        ensure_manifest_media_bin_column(conn)?;
+        ensure_manifest_default_page_media_json_column(conn)?;
         conn.execute(
             "INSERT INTO runtime_meta (key, value, updated_at)
              VALUES ('schema_version', ?1, unixepoch('now') * 1000)
@@ -494,16 +495,9 @@ impl IndexStore {
         )?;
         Ok(())
     }
-
-    fn open(&self) -> Result<Connection> {
-        let conn = Connection::open(self.db_path.as_ref())
-            .with_context(|| format!("open sqlite {}", self.db_path.display()))?;
-        configure_connection(&conn)?;
-        Ok(conn)
-    }
 }
 
-fn configure_connection(conn: &Connection) -> Result<()> {
+fn configure_connection(conn: &mut Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         "
         PRAGMA journal_mode = WAL;
@@ -572,17 +566,33 @@ mod tests {
     async fn opens_connections_with_wal_enabled() {
         let temp = tempdir().expect("tempdir");
         let store = IndexStore::new(temp.path()).await.expect("store");
-        let conn = store.open().expect("open");
+        let conn_a = store.pool.get().await.expect("conn a");
+        let conn_b = store.pool.get().await.expect("conn b");
 
-        let journal_mode = conn
-            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
-            .expect("journal mode");
-        let wal_autocheckpoint = conn
-            .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0))
-            .expect("wal autocheckpoint");
+        let read_pragmas = |conn: deadpool_sqlite::Connection| async move {
+            conn.interact(|conn| {
+                let jm = conn
+                    .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                    .expect("journal mode");
+                let wac = conn
+                    .query_row("PRAGMA wal_autocheckpoint", [], |row| row.get::<_, i64>(0))
+                    .expect("wal autocheckpoint");
+                let busy_timeout = conn
+                    .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                    .expect("busy timeout");
+                (jm, wac, busy_timeout)
+            })
+            .await
+            .expect("read pragmas")
+        };
 
-        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
-        assert_eq!(wal_autocheckpoint, 1000);
+        let (pragmas_a, pragmas_b) = tokio::join!(read_pragmas(conn_a), read_pragmas(conn_b));
+
+        for (journal_mode, wal_autocheckpoint, busy_timeout) in [pragmas_a, pragmas_b] {
+            assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+            assert_eq!(wal_autocheckpoint, 1000);
+            assert_eq!(busy_timeout, 5000);
+        }
     }
 
     #[tokio::test]

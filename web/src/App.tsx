@@ -1,5 +1,4 @@
 import {
-  startTransition,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -71,10 +70,8 @@ function App() {
     categoryLoadingMore,
     categoryHasMore,
     categoryError,
-    setCategoryVisibleCount,
     handleSelectCategory,
     refreshCategory,
-    invalidateCategoryCache,
     loadMoreCategory,
     resetCategory,
   } = useCategoryMedia({ rootVersion, mediaFilter, mediaSort });
@@ -124,25 +121,10 @@ function App() {
     [handleSelectCategory]
   );
   const onReachEnd = useCallback(() => {
-    if (visibleMedia.length < categoryMedia.length) {
-      startTransition(() => {
-        setCategoryVisibleCount((previous) =>
-          Math.min(previous + 32, categoryMedia.length)
-        );
-      });
-      return;
-    }
     if (categoryHasMore && !categoryLoadingMore) {
       void loadMoreCategory();
     }
-  }, [
-    categoryMedia.length,
-    categoryHasMore,
-    categoryLoadingMore,
-    loadMoreCategory,
-    setCategoryVisibleCount,
-    visibleMedia.length,
-  ]);
+  }, [categoryHasMore, categoryLoadingMore, loadMoreCategory]);
   const onRefresh = useCallback(async () => {
     if (refreshing) return;
     setRefreshing(true);
@@ -150,7 +132,6 @@ function App() {
 
     const preferredPath = categoryPath;
     resetRootPreviewQueue();
-    invalidateCategoryCache();
 
     try {
       const nextRoot = await loadRoot();
@@ -170,8 +151,7 @@ function App() {
             subfolders: refreshedAccounts.length,
           },
         },
-        preferredPath,
-        rootStore.getVersion()
+        preferredPath
       );
     } finally {
       setRefreshing(false);
@@ -180,7 +160,6 @@ function App() {
     categoryPath,
     deferredSearch,
     enqueueRootPreviewPaths,
-    invalidateCategoryCache,
     loadRoot,
     mediaFilter,
     refreshCategory,

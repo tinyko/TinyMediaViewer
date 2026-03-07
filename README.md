@@ -12,11 +12,13 @@
 ## 当前设计
 - 根目录列表走轻量快照，账号切换走完整分页接口和服务端分页，避免首次加载就扫描整库。
 - 左侧账号列表和右侧媒体网格都做了虚拟化；根目录数据在前端走归一化 store，预览和计数按可见账号批量回填。
+- 分类媒体请求由 React Query 管理：`useInfiniteQuery` 负责分页、缓存和失效，查询 key 按账号路径、媒体类型、排序方向和根目录版本隔离。
 - 账号行右侧支持收藏按钮，收藏状态通过 Rust backend 写入 SQLite；顶部 `按收藏` 会筛出收藏账号，不是简单排序置顶。
 - 前端特效层已经收口成共享 `EffectsStage`，默认请求 `webgpu`，初始化失败时自动回退到 `canvas2d`，工具栏显示 `WG×`。
 - 前后端契约由 Rust DTO 生成 TypeScript 文件，前端不再依赖旧的 `shared-types` 包。
 - 桌面端和开发态都只走 Rust backend，不再依赖旧的 Node/Fastify 服务链路。
 - 缩略图链路不再依赖 `ffmpeg`：图片和 GIF 首帧由 Rust 本地生成，macOS 上的视频缩略图走 AVFoundation；视频缩略图按 `/thumb/*` 请求懒生成并缓存到文件系统和 SQLite。
+- SQLite 持久化层使用 `deadpool-sqlite` 连接池，每条连接在创建时都会补齐 `WAL`、`busy_timeout` 和相关 PRAGMA，再统一复用到 manifest、收藏和缩略图状态读写中。
 
 ## 仓库结构
 - `backend-rs/`
@@ -24,15 +26,15 @@
   - `tmv-backend-app`: 可执行入口，提供 HTTP 服务和静态 viewer。
   - `tmv-backend-api`: Axum 路由层，暴露 `/api/folder`、`/api/folder/previews`、`/api/folder/favorite`、`/__tmv/diag/*`、`/media/*`、`/thumb/*`。
   - `tmv-backend-core`: 目录扫描、缓存、分页、排序、预览构建、LAN 鉴权、收藏状态叠加、缩略图调度。
-  - `tmv-backend-index`: SQLite 持久化，保存索引、收藏、缩略图 job/asset 等本地状态。
+  - `tmv-backend-index`: SQLite 持久化，基于 `deadpool-sqlite` 保存索引、收藏、缩略图 job/asset 等本地状态。
   - `tmv-backend-watch`: 文件系统 watch，目录变化时失效缓存。
   - `tmv-contract-export`: 从 Rust DTO 生成前端 TypeScript 契约。
 - `web/`
-  React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，分类媒体缓存和分页逻辑在 hooks 内收口，特效层支持真实 `canvas2d/webgpu` 双分支。
+  React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，分类媒体通过 React Query 分页缓存，特效层支持真实 `canvas2d/webgpu` 双分支。
 - `desktop/`
-  Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包。
+  Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包，并在打包时把当前 `git rev-parse --short HEAD` 和 UTC 构建时间注入 viewer 指纹。
 - `archive/node-legacy/`
-  归档的 Node/Fastify 旧实现，仅作历史参考，不参与主线运行、构建或 CI。
+  归档的 Node/Fastify 旧实现，仅作历史参考，不参与主线运行、构建或 CI。目录内仍保留 legacy smoke 脚本，脚本会自行构建依赖的后端并在失败时保存错误截图。
 
 ## 运行方式
 ### 开发态
@@ -117,9 +119,11 @@ Rust workspace：
 
 ```bash
 cd /Users/tiny/X/media-viewer/backend-rs
-cargo fmt --check
+cargo fmt --check --all
+cargo check --workspace
+cargo clippy --workspace --all-targets
 cargo test --workspace
-cargo build -p tmv-backend-app
+cargo doc --workspace --no-deps
 cargo run -p tmv-contract-export -- --check
 ```
 

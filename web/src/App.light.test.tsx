@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
 import {
@@ -14,6 +14,7 @@ import type {
   FolderPreviewBatchOutput,
   MediaItem,
 } from "./types";
+import { renderWithQueryClient } from "./test/queryClient";
 
 vi.mock("./api", () => ({
   fetchFolder: vi.fn(),
@@ -153,7 +154,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue(previewOutput);
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     expect(await screen.findByRole("button", { name: /^alpha/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^beta/i })).toBeInTheDocument();
@@ -183,7 +184,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockReturnValue(previewDeferred.promise);
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     const alphaButton = await screen.findByRole("button", { name: /^alpha/i });
     expect(alphaButton).toBeInTheDocument();
@@ -254,7 +255,7 @@ describe("App root light mode + preview backfill", () => {
       ],
     });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     expect(await screen.findByText("60 / 60 媒体")).toBeInTheDocument();
   });
@@ -288,7 +289,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     expect(await screen.findByText("4112 / 4114 媒体")).toBeInTheDocument();
 
@@ -338,7 +339,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     expect(await screen.findByRole("button", { name: /^alpha/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /beta/i })).not.toBeInTheDocument();
@@ -415,7 +416,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     await screen.findByText("cover.jpg");
     await userEvent.click(screen.getByRole("button", { name: "视频" }));
@@ -471,7 +472,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     expect(await screen.findByText("A.jpg")).toBeInTheDocument();
 
@@ -527,7 +528,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     expect(await screen.findByText("A.jpg")).toBeInTheDocument();
 
@@ -587,7 +588,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     expect(await screen.findByText("A_old.jpg")).toBeInTheDocument();
 
@@ -646,7 +647,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     await screen.findByText("A.jpg");
     await userEvent.click(screen.getByRole("button", { name: /^beta/i }));
@@ -684,7 +685,7 @@ describe("App root light mode + preview backfill", () => {
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     const mediaName = await screen.findByText("Visible.jpg");
     await userEvent.click(mediaName);
@@ -728,7 +729,7 @@ describe("App root light mode + preview backfill", () => {
       return previewCalls === 1 ? firstPreviewDeferred.promise : secondPreviewDeferred.promise;
     });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     await waitFor(() => {
       expect(mockedFetchFolderPreviews).toHaveBeenCalledTimes(1);

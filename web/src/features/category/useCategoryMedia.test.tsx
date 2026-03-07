@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { fetchFolder } from "../../api";
 import type { FolderPayload } from "../../types";
 import { makePerfMediaItem } from "../../test/performanceFixtures";
+import { createQueryClientWrapper } from "../../test/queryClient";
 import { useCategoryMedia } from "./useCategoryMedia";
 
 vi.mock("../../api", () => ({
@@ -74,6 +75,7 @@ describe("useCategoryMedia", () => {
       ({ rootVersion, mediaFilter, mediaSort }) =>
         useCategoryMedia({ rootVersion, mediaFilter, mediaSort }),
       {
+        wrapper: createQueryClientWrapper(),
         initialProps: {
           rootVersion: 1,
           mediaFilter: "image",
@@ -171,6 +173,7 @@ describe("useCategoryMedia", () => {
       ({ rootVersion, mediaFilter, mediaSort }) =>
         useCategoryMedia({ rootVersion, mediaFilter, mediaSort }),
       {
+        wrapper: createQueryClientWrapper(),
         initialProps: {
           rootVersion: 1,
           mediaFilter: "image",
@@ -273,12 +276,16 @@ describe("useCategoryMedia", () => {
       );
     });
 
-    const { result } = renderHook(() =>
-      useCategoryMedia({
-        rootVersion: 1,
-        mediaFilter: "image",
-        mediaSort: "desc",
-      })
+    const { result } = renderHook(
+      () =>
+        useCategoryMedia({
+          rootVersion: 1,
+          mediaFilter: "image",
+          mediaSort: "desc",
+        }),
+      {
+        wrapper: createQueryClientWrapper(),
+      }
     );
 
     await act(async () => {

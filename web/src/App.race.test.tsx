@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
 import {
@@ -9,6 +9,7 @@ import {
   postPreviewDiagnostics,
 } from "./api";
 import type { FolderPayload } from "./types";
+import { renderWithQueryClient } from "./test/queryClient";
 
 vi.mock("./api", () => ({
   fetchFolder: vi.fn(),
@@ -113,7 +114,7 @@ describe("App request race handling", () => {
       return Promise.reject(new Error(`Unexpected path: ${path}`));
     });
 
-    render(<App />);
+    renderWithQueryClient(<App />);
 
     const betaButton = await screen.findByRole("button", { name: /^beta/i });
     await userEvent.click(betaButton);

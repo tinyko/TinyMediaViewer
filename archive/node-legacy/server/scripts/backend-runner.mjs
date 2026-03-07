@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, "..", "..");
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
 const SERVER_DIR = path.resolve(__dirname, "..");
 const BACKEND_DIR = path.join(REPO_ROOT, "backend-rs");
 const NODE_DIST_ENTRY = path.join(SERVER_DIR, "dist", "server.js");
@@ -21,13 +21,25 @@ const HOST = "127.0.0.1";
 const builtBackends = new Set();
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const withCargoBinOnPath = (env) => {
+  const home = env.HOME;
+  if (!home) return env;
+  const cargoBin = path.join(home, ".cargo", "bin");
+  const currentPath = env.PATH || "";
+  const entries = currentPath.split(path.delimiter).filter(Boolean);
+  if (entries.includes(cargoBin)) return env;
+  return {
+    ...env,
+    PATH: currentPath ? `${currentPath}${path.delimiter}${cargoBin}` : cargoBin,
+  };
+};
 
 const runCommand = (command, args, cwd) =>
   new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
       stdio: "inherit",
-      env: process.env,
+      env: withCargoBinOnPath(process.env),
     });
     child.on("error", reject);
     child.on("exit", (code) => {
@@ -88,7 +100,7 @@ export const ensureBackendBuild = async (backend, options = {}) => {
       rustProfile === "release"
         ? ["build", "--release", "-p", "tmv-backend-app"]
         : ["build", "-p", "tmv-backend-app"];
-    await runCommand("cargo", cargoArgs, BACKEND_DIR);
+    await runCommand(process.env.CARGO ?? "cargo", cargoArgs, BACKEND_DIR);
     builtBackends.add(cacheKey);
     return;
   }

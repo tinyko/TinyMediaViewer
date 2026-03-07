@@ -7,10 +7,10 @@ import { pickFreePort, startBackend, stopBackend } from "./backend-runner.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const REPO_ROOT = path.resolve(__dirname, "..", "..");
+const REPO_ROOT = path.resolve(__dirname, "..", "..", "..", "..");
 const WEB_DIR = path.join(REPO_ROOT, "web");
 const OUTPUT_DIR = path.join(REPO_ROOT, "output", "playwright");
-const TMP_ROOT = path.join(REPO_ROOT, "server", ".tmp");
+const TMP_ROOT = path.join(REPO_ROOT, "archive", "node-legacy", "server", ".tmp");
 const HOST = "127.0.0.1";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -138,6 +138,7 @@ const runSmoke = async ({ backend, mediaRoot, headed }) => {
   let backendHandle;
   let viteHandle;
   let browser;
+  let page;
 
   try {
     backendHandle = await startBackend({
@@ -152,7 +153,7 @@ const runSmoke = async ({ backend, mediaRoot, headed }) => {
     viteHandle = await startVite({ backendPort, viewerPort });
 
     browser = await chromium.launch({ headless: !headed });
-    const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
     const consoleErrors = [];
     const pageErrors = [];
     page.on("console", (message) => {
@@ -225,6 +226,13 @@ const runSmoke = async ({ backend, mediaRoot, headed }) => {
       ...summary,
       summaryPath,
     };
+  } catch (err) {
+    if (page) {
+      const errShot = takeScreenshotPath(`${backend}-error`);
+      await page.screenshot({ path: errShot, fullPage: true }).catch(() => { });
+      console.error(`Saved error screenshot to ${errShot}`);
+    }
+    throw err;
   } finally {
     await browser?.close().catch(() => undefined);
     await stopProcess(viteHandle?.child).catch(() => undefined);
