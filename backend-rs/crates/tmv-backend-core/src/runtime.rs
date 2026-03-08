@@ -8,7 +8,7 @@ use std::{
 pub(crate) struct RuntimeState {
     path_generations: RwLock<HashMap<String, u64>>,
     light_snapshots: RwLock<HashMap<String, (u64, Arc<FolderSnapshot>)>>,
-    previews: RwLock<HashMap<PreviewCacheKey, (u64, FolderPreview)>>,
+    previews: RwLock<HashMap<String, HashMap<usize, (u64, FolderPreview)>>>,
     manifests: RwLock<HashMap<String, (u64, DirectoryManifest)>>,
 }
 
@@ -84,7 +84,8 @@ impl RuntimeState {
         self.previews
             .read()
             .expect("runtime previews poisoned")
-            .get(key)
+            .get(&key.path)
+            .and_then(|limits| limits.get(&key.limit))
             .filter(|(stored_generation, _)| *stored_generation == generation)
             .map(|(_, preview)| preview.clone())
     }
@@ -98,7 +99,9 @@ impl RuntimeState {
         self.previews
             .write()
             .expect("runtime previews poisoned")
-            .insert(key, (generation, preview));
+            .entry(key.path)
+            .or_default()
+            .insert(key.limit, (generation, preview));
     }
 
     pub(crate) fn read_manifest_cache(
@@ -138,6 +141,25 @@ impl RuntimeState {
         self.previews
             .write()
             .expect("runtime previews poisoned")
-            .retain(|key, _| key.path.as_str() != path);
+            .remove(path);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn preview_cache_entry_count(&self) -> usize {
+        self.previews
+            .read()
+            .expect("runtime previews poisoned")
+            .values()
+            .map(HashMap::len)
+            .sum()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_preview_cache_entry(&self, path: &str, limit: usize) -> bool {
+        self.previews
+            .read()
+            .expect("runtime previews poisoned")
+            .get(path)
+            .is_some_and(|limits| limits.contains_key(&limit))
     }
 }

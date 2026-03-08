@@ -14,6 +14,9 @@ describe("rootStore", () => {
     const initialState = store.getState();
     const target = initialState.subfoldersByPath.get("account-0001");
     const untouched = initialState.subfoldersByPath.get("account-0002");
+    const initialOrderByName = initialState.orderByName;
+    const initialOrderByModified = initialState.orderByModified;
+    const initialOrderByFavorite = initialState.orderByFavorite;
     expect(target).toBeDefined();
     expect(untouched).toBeDefined();
 
@@ -36,6 +39,10 @@ describe("rootStore", () => {
     expect(nextState.version).toBe(initialState.version);
     expect(nextState.subfoldersByPath.get("account-0001")).not.toBe(target);
     expect(nextState.subfoldersByPath.get("account-0002")).toBe(untouched);
+    expect(nextState.orderByName).toBe(initialOrderByName);
+    expect(nextState.orderByModified).not.toBe(initialOrderByModified);
+    expect(nextState.orderByFavorite).not.toBe(initialOrderByFavorite);
+    expect(nextState.orderByModified[0]).toBe("account-0001");
   });
 
   it("filters accounts by search text and media type using stable store selectors", () => {
@@ -61,6 +68,9 @@ describe("rootStore", () => {
   it("returns only favorited accounts in favorite mode and updates immediately when toggled", () => {
     const store = createRootFolderStore();
     store.replaceRoot(makePerfRootPayload(4));
+    const initialState = store.getState();
+    const initialOrderByName = initialState.orderByName;
+    const initialOrderByModified = initialState.orderByModified;
 
     store.setFavorite("account-0002", true);
 
@@ -83,6 +93,8 @@ describe("rootStore", () => {
       "account-0001",
       "account-0002",
     ]);
+    expect(store.getState().orderByName).toBe(initialOrderByName);
+    expect(store.getState().orderByModified).toBe(initialOrderByModified);
   });
 
   it("keeps random account ordering stable for the same seed and rerolls when the seed changes", () => {
@@ -128,6 +140,9 @@ describe("rootStore", () => {
 
     const before = store.getState().subfoldersByPath.get("account-0003");
     const readyBefore = store.getState().subfoldersByPath.get("account-0001");
+    const initialOrderByName = store.getState().orderByName;
+    const initialOrderByModified = store.getState().orderByModified;
+    const initialOrderByFavorite = store.getState().orderByFavorite;
 
     store.markPreviewFailed(["account-0003"], {
       expectedVersion: store.getVersion(),
@@ -140,5 +155,8 @@ describe("rootStore", () => {
     expect(after?.countsReady).toBe(true);
     expect(after?.previewReady).toBe(false);
     expect(readyAfter).toBe(readyBefore);
+    expect(store.getState().orderByName).toBe(initialOrderByName);
+    expect(store.getState().orderByModified).toBe(initialOrderByModified);
+    expect(store.getState().orderByFavorite).toBe(initialOrderByFavorite);
   });
 });

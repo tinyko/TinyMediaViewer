@@ -26,26 +26,91 @@ const EMPTY_STATE: RootFolderStoreState = {
   version: 0,
 };
 
-const sortSubfoldersByName = (items: readonly FolderPreview[]) =>
-  [...items]
-    .sort((left, right) => left.name.localeCompare(right.name) || left.path.localeCompare(right.path))
-    .map((item) => item.path);
+const compareFolderPreviewByName = (
+  left: FolderPreview,
+  right: FolderPreview
+) => left.name.localeCompare(right.name) || left.path.localeCompare(right.path);
 
-const sortSubfoldersByModified = (items: readonly FolderPreview[]) =>
-  [...items]
-    .sort((left, right) => right.modified - left.modified || left.path.localeCompare(right.path))
-    .map((item) => item.path);
+const compareFolderPreviewByModified = (
+  left: FolderPreview,
+  right: FolderPreview
+) => right.modified - left.modified || left.path.localeCompare(right.path);
 
-const sortSubfoldersByFavorite = (items: readonly FolderPreview[]) =>
-  [...items]
-    .sort(
-      (left, right) =>
-        Number(Boolean(right.favorite)) - Number(Boolean(left.favorite)) ||
-        right.modified - left.modified ||
-        left.name.localeCompare(right.name) ||
-        left.path.localeCompare(right.path)
-    )
-    .map((item) => item.path);
+const compareFolderPreviewByFavorite = (
+  left: FolderPreview,
+  right: FolderPreview
+) =>
+  Number(Boolean(right.favorite)) - Number(Boolean(left.favorite)) ||
+  right.modified - left.modified ||
+  left.name.localeCompare(right.name) ||
+  left.path.localeCompare(right.path);
+
+const sortPathsByComparator = (
+  paths: readonly string[],
+  subfoldersByPath: ReadonlyMap<string, FolderPreview>,
+  compare: (left: FolderPreview, right: FolderPreview) => number
+) =>
+  [...paths].sort((leftPath, rightPath) => {
+    const left = subfoldersByPath.get(leftPath);
+    const right = subfoldersByPath.get(rightPath);
+    if (!left && !right) return leftPath.localeCompare(rightPath);
+    if (!left) return 1;
+    if (!right) return -1;
+    return compare(left, right);
+  });
+
+const findSortedInsertIndex = (
+  paths: readonly string[],
+  path: string,
+  subfoldersByPath: ReadonlyMap<string, FolderPreview>,
+  compare: (left: FolderPreview, right: FolderPreview) => number
+) => {
+  const candidate = subfoldersByPath.get(path);
+  if (!candidate) return paths.length;
+
+  let low = 0;
+  let high = paths.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const current = subfoldersByPath.get(paths[middle]);
+    if (!current) {
+      high = middle;
+      continue;
+    }
+    if (compare(candidate, current) <= 0) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+  return low;
+};
+
+const patchOrderedPaths = (
+  currentOrder: readonly string[],
+  subfoldersByPath: ReadonlyMap<string, FolderPreview>,
+  changedPaths: readonly string[],
+  compare: (left: FolderPreview, right: FolderPreview) => number
+) => {
+  if (!changedPaths.length) {
+    return currentOrder;
+  }
+
+  const changedPathSet = new Set(changedPaths);
+  const nextOrder = currentOrder.filter((path) => !changedPathSet.has(path));
+  const sortedChangedPaths = sortPathsByComparator(
+    [...changedPathSet].filter((path) => subfoldersByPath.has(path)),
+    subfoldersByPath,
+    compare
+  );
+
+  for (const path of sortedChangedPaths) {
+    const insertIndex = findSortedInsertIndex(nextOrder, path, subfoldersByPath, compare);
+    nextOrder.splice(insertIndex, 0, path);
+  }
+
+  return nextOrder;
+};
 
 const rankPathForRandomSeed = (path: string, seed: number) => {
   let hash = (0x811c9dc5 ^ seed) >>> 0;
@@ -113,6 +178,7 @@ const buildStateFromPayload = (
 ): RootFolderStoreState => {
   const subfoldersByPath = new Map(payload.subfolders.map((item) => [item.path, item]));
   const nameSearchIndex = new Map(payload.subfolders.map((item) => [item.path, item.name.toLowerCase()]));
+  const paths = payload.subfolders.map((item) => item.path);
   return {
     folderMeta: {
       folder: payload.folder,
@@ -120,9 +186,17 @@ const buildStateFromPayload = (
       totals: payload.totals,
     },
     subfoldersByPath,
-    orderByName: sortSubfoldersByName(payload.subfolders),
-    orderByModified: sortSubfoldersByModified(payload.subfolders),
-    orderByFavorite: sortSubfoldersByFavorite(payload.subfolders),
+    orderByName: sortPathsByComparator(paths, subfoldersByPath, compareFolderPreviewByName),
+    orderByModified: sortPathsByComparator(
+      paths,
+      subfoldersByPath,
+      compareFolderPreviewByModified
+    ),
+    orderByFavorite: sortPathsByComparator(
+      paths,
+      subfoldersByPath,
+      compareFolderPreviewByFavorite
+    ),
     nameSearchIndex,
     version,
   };
@@ -309,6 +383,7 @@ export class RootFolderStore {
 
     let nextSubfoldersByPath: Map<string, FolderPreview> | null = null;
     let nextNameSearchIndex: Map<string, string> | null = null;
+    const changedPaths: string[] = [];
     let needsNameResort = false;
     let needsModifiedResort = false;
     let needsFavoriteResort = false;
@@ -336,6 +411,7 @@ export class RootFolderStore {
         nextSubfoldersByPath = new Map(this.state.subfoldersByPath);
       }
       nextSubfoldersByPath.set(patch.path, patch);
+      changedPaths.push(patch.path);
 
       if (current.name !== patch.name) {
         needsNameResort = true;
@@ -363,13 +439,28 @@ export class RootFolderStore {
       subfoldersByPath: nextSubfoldersByPath,
       nameSearchIndex: nextNameSearchIndex ?? this.state.nameSearchIndex,
       orderByName: needsNameResort
-        ? sortSubfoldersByName([...nextSubfoldersByPath.values()])
+        ? patchOrderedPaths(
+            this.state.orderByName,
+            nextSubfoldersByPath,
+            changedPaths,
+            compareFolderPreviewByName
+          )
         : this.state.orderByName,
       orderByModified: needsModifiedResort
-        ? sortSubfoldersByModified([...nextSubfoldersByPath.values()])
+        ? patchOrderedPaths(
+            this.state.orderByModified,
+            nextSubfoldersByPath,
+            changedPaths,
+            compareFolderPreviewByModified
+          )
         : this.state.orderByModified,
       orderByFavorite: needsFavoriteResort
-        ? sortSubfoldersByFavorite([...nextSubfoldersByPath.values()])
+        ? patchOrderedPaths(
+            this.state.orderByFavorite,
+            nextSubfoldersByPath,
+            changedPaths,
+            compareFolderPreviewByFavorite
+          )
         : this.state.orderByFavorite,
     };
     this.emit();
@@ -391,7 +482,12 @@ export class RootFolderStore {
     this.state = {
       ...this.state,
       subfoldersByPath: nextSubfoldersByPath,
-      orderByFavorite: sortSubfoldersByFavorite([...nextSubfoldersByPath.values()]),
+      orderByFavorite: patchOrderedPaths(
+        this.state.orderByFavorite,
+        nextSubfoldersByPath,
+        [path],
+        compareFolderPreviewByFavorite
+      ),
     };
     this.emit();
     return true;

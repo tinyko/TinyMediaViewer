@@ -3,10 +3,7 @@ import { fetchCategoryPage } from "../../api";
 import type { CategoryPagePayload } from "../../types";
 import { makePerfMediaItem } from "../../test/performanceFixtures";
 import { createQueryClientWrapper } from "../../test/queryClient";
-import {
-  __categoryAggregateCacheForTests,
-  useCategoryMedia,
-} from "./useCategoryMedia";
+import { useCategoryMedia } from "./useCategoryMedia";
 
 vi.mock("../../api", () => ({
   fetchCategoryPage: vi.fn(),
@@ -56,7 +53,6 @@ const makeCategoryPage = (
 describe("useCategoryMedia", () => {
   beforeEach(() => {
     mockedFetchCategoryPage.mockReset();
-    __categoryAggregateCacheForTests.clear();
   });
 
   it("requests sort-specific pages from the backend", async () => {
@@ -418,16 +414,35 @@ describe("useCategoryMedia", () => {
     ).toHaveLength(1);
   });
 
-  it("evicts the least recently used aggregate cache entry after 24 query keys", async () => {
-    mockedFetchCategoryPage.mockImplementation((path) => {
-      if (path !== "alpha") {
-        throw new Error(`Unexpected path ${path}`);
+  it("rebuilds aggregated media when the category query key changes", async () => {
+    mockedFetchCategoryPage.mockImplementation((_path, options) => {
+      if (options?.cursor === "page-2" && options?.kind === "image" && options?.sort === "desc") {
+        return Promise.resolve(
+          makeCategoryPage("alpha", ["IMG_20260307_000002.jpg", "IMG_20260307_000001.jpg"])
+        );
       }
-      return Promise.resolve(
-        makeCategoryPage("alpha", ["IMG_20260307_000001.jpg"])
-      );
+      if (options?.kind === "image" && options?.sort === "desc") {
+        if (options?.cursor) {
+          throw new Error(`Unexpected cursor: ${options.cursor}`);
+        }
+        if (callCount === 0) {
+          callCount += 1;
+          return Promise.resolve(
+            makeCategoryPage(
+              "alpha",
+              ["IMG_20260307_000004.jpg", "IMG_20260307_000003.jpg", "IMG_20260307_000002.jpg"],
+              { nextCursor: "page-2" }
+            )
+          );
+        }
+        return Promise.resolve(
+          makeCategoryPage("alpha", ["IMG_20260308_000006.jpg", "IMG_20260308_000005.jpg"])
+        );
+      }
+      throw new Error(`Unexpected query: ${JSON.stringify(options)}`);
     });
 
+    let callCount = 0;
     const { result, rerender } = renderHook<ReturnType<typeof useCategoryMedia>, HookProps>(
       ({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed }) =>
         useCategoryMedia({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed }),
@@ -446,61 +461,43 @@ describe("useCategoryMedia", () => {
       await result.current.handleSelectCategory("alpha");
     });
 
-    for (let version = 1; version <= 25; version += 1) {
-      rerender({
-        rootVersion: version,
-        mediaFilter: "image",
-        mediaSort: "desc",
-        mediaRandomSeed: 0,
-      });
-      await waitFor(() => {
-        expect(result.current.categoryMedia.length).toBeGreaterThan(0);
-      });
-    }
-
-    expect(__categoryAggregateCacheForTests.size()).toBe(24);
-    expect(
-      __categoryAggregateCacheForTests.has(
-        JSON.stringify(["category", "alpha", "image", "desc", 1])
-      )
-    ).toBe(false);
-    expect(
-      __categoryAggregateCacheForTests.has(
-        JSON.stringify(["category", "alpha", "image", "desc", 25])
-      )
-    ).toBe(true);
-  });
-
-  it("clears aggregate entries when category queries are invalidated", async () => {
-    mockedFetchCategoryPage.mockResolvedValue(
-      makeCategoryPage("alpha", ["IMG_20260307_000001.jpg"])
-    );
-
-    const { result } = renderHook(
-      () =>
-        useCategoryMedia({
-          rootVersion: 1,
-          mediaFilter: "image",
-          mediaSort: "desc",
-          mediaRandomSeed: 0,
-        }),
-      {
-        wrapper: createQueryClientWrapper(),
-      }
-    );
+    await waitFor(() => {
+      expect(result.current.categoryHasMore).toBe(true);
+    });
 
     await act(async () => {
-      await result.current.handleSelectCategory("alpha");
+      await result.current.loadMoreCategory();
     });
 
     await waitFor(() => {
-      expect(__categoryAggregateCacheForTests.size()).toBe(1);
+      expect(result.current.categoryMedia.map((item) => item.path)).toEqual([
+        "alpha/IMG_20260307_000004.jpg",
+        "alpha/IMG_20260307_000003.jpg",
+        "alpha/IMG_20260307_000002.jpg",
+        "alpha/IMG_20260307_000001.jpg",
+      ]);
     });
 
-    act(() => {
-      result.current.invalidateCategoryCache();
+    rerender({
+      rootVersion: 2,
+      mediaFilter: "image",
+      mediaSort: "desc",
+      mediaRandomSeed: 0,
     });
 
-    expect(__categoryAggregateCacheForTests.size()).toBe(0);
+    await waitFor(() => {
+      expect(result.current.categoryMedia.map((item) => item.path)).toEqual([
+        "alpha/IMG_20260308_000006.jpg",
+        "alpha/IMG_20260308_000005.jpg",
+      ]);
+      expect(result.current.categoryHasMore).toBe(false);
+    });
+
+    expect(
+      mockedFetchCategoryPage.mock.calls.filter(
+        ([path, options]) =>
+          path === "alpha" && options?.kind === "image" && options?.sort === "desc"
+      )
+    ).toHaveLength(3);
   });
 });

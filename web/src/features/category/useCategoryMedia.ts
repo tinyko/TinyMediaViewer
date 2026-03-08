@@ -1,54 +1,21 @@
+/* eslint-disable react-hooks/refs */
 import {
   useCallback,
   useMemo,
+  useRef,
   useState,
   startTransition,
 } from "react";
-import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { fetchCategoryPage } from "../../api";
 import type { MediaItem } from "../../types";
 import { sortMediaByRandomSeed } from "./mediaUtils";
 
 const SERVER_PAGE_SIZE = 120;
-const CATEGORY_AGGREGATE_CACHE_LIMIT = 24;
-const categoryAggregateCache = new Map<
-  string,
-  {
-    pageSignatures: string[];
-    media: MediaItem[];
-    seenPaths: Set<string>;
-  }
->();
-
-const touchCategoryAggregateCache = (
-  key: string,
-  entry: {
-    pageSignatures: string[];
-    media: MediaItem[];
-    seenPaths: Set<string>;
-  }
-) => {
-  categoryAggregateCache.delete(key);
-  categoryAggregateCache.set(key, entry);
-  while (categoryAggregateCache.size > CATEGORY_AGGREGATE_CACHE_LIMIT) {
-    const oldestKey = categoryAggregateCache.keys().next().value;
-    if (!oldestKey) break;
-    categoryAggregateCache.delete(oldestKey);
-  }
-};
-
-const clearCategoryAggregateCache = () => {
-  categoryAggregateCache.clear();
-};
-
-export const __categoryAggregateCacheForTests = {
-  clear: clearCategoryAggregateCache,
-  size: () => categoryAggregateCache.size,
-  has: (key: string) => categoryAggregateCache.has(key),
-};
 
 type CategoryMediaFilter = "image" | "video";
 type MediaSortMode = "asc" | "desc" | "random";
+type BackendSortMode = "asc" | "desc";
 
 interface UseCategoryMediaOptions {
   rootVersion: number;
@@ -57,21 +24,72 @@ interface UseCategoryMediaOptions {
   mediaRandomSeed: number;
 }
 
+interface CategoryAggregateState {
+  categoryPath: string | null;
+  mediaFilter: CategoryMediaFilter;
+  backendSort: BackendSortMode;
+  rootVersion: number;
+  pageSignatures: string[];
+  media: MediaItem[];
+  seenPaths: Set<string>;
+}
+
+const isSameAggregateKey = (
+  aggregate: CategoryAggregateState | null,
+  key: Pick<
+    CategoryAggregateState,
+    "categoryPath" | "mediaFilter" | "backendSort" | "rootVersion"
+  >
+) =>
+  Boolean(aggregate) &&
+  aggregate!.categoryPath === key.categoryPath &&
+  aggregate!.mediaFilter === key.mediaFilter &&
+  aggregate!.backendSort === key.backendSort &&
+  aggregate!.rootVersion === key.rootVersion;
+
+const buildPageSignatures = (
+  pages: readonly {
+    media: MediaItem[];
+    nextCursor?: string | null;
+  }[]
+) =>
+  pages.map((page) => {
+    const firstPath = page.media[0]?.path ?? "";
+    const lastPath = page.media.at(-1)?.path ?? "";
+    return `${page.nextCursor ?? ""}\u0000${page.media.length}\u0000${firstPath}\u0000${lastPath}`;
+  });
+
+const rebuildAggregateMedia = (
+  pages: readonly {
+    media: MediaItem[];
+  }[]
+) => {
+  const media: MediaItem[] = [];
+  const seenPaths = new Set<string>();
+  for (const page of pages) {
+    for (const item of page.media) {
+      if (seenPaths.has(item.path)) continue;
+      seenPaths.add(item.path);
+      media.push(item);
+    }
+  }
+  return { media, seenPaths };
+};
+
 export function useCategoryMedia({
   rootVersion,
   mediaFilter,
   mediaSort,
   mediaRandomSeed,
 }: UseCategoryMediaOptions) {
-  const queryClient = useQueryClient();
+  const aggregateRef = useRef<CategoryAggregateState | null>(null);
   const [categoryPath, setCategoryPath] = useState<string | null>(null);
-  const backendSort = mediaSort === "random" ? "desc" : mediaSort;
+  const backendSort: BackendSortMode = mediaSort === "random" ? "desc" : mediaSort;
 
   const queryKey = useMemo(
-    () => ["category", categoryPath, mediaFilter, backendSort, rootVersion],
+    () => ["category", categoryPath, mediaFilter, backendSort, rootVersion] as const,
     [backendSort, categoryPath, mediaFilter, rootVersion]
   );
-  const queryKeyId = JSON.stringify(queryKey);
 
   const {
     data,
@@ -100,26 +118,28 @@ export function useCategoryMedia({
   const categoryPreview = data?.pages[0] ?? null;
 
   const categoryMediaBase = useMemo(() => {
+    const aggregateKey = {
+      categoryPath,
+      mediaFilter,
+      backendSort,
+      rootVersion,
+    };
+
     if (!data) {
-      categoryAggregateCache.delete(queryKeyId);
       return [];
     }
 
-    const pageSignatures = data.pages.map((page) => {
-      const firstPath = page.media[0]?.path ?? "";
-      const lastPath = page.media.at(-1)?.path ?? "";
-      return `${page.nextCursor ?? ""}\u0000${page.media.length}\u0000${firstPath}\u0000${lastPath}`;
-    });
-    const previous = categoryAggregateCache.get(queryKeyId);
-    const sameQuery = Boolean(previous);
+    const pageSignatures = buildPageSignatures(data.pages);
+    const previous = aggregateRef.current;
+    const sameKey = isSameAggregateKey(previous, aggregateKey);
     const prefixMatches =
-      sameQuery &&
+      sameKey &&
       previous!.pageSignatures.length <= pageSignatures.length &&
       previous!.pageSignatures.every((signature, index) => signature === pageSignatures[index]);
 
-    if (sameQuery && prefixMatches && previous!.pageSignatures.length < pageSignatures.length) {
+    if (sameKey && prefixMatches && previous!.pageSignatures.length < pageSignatures.length) {
       const appended = previous!.media.slice();
-      const seenPaths = previous!.seenPaths;
+      const seenPaths = new Set(previous!.seenPaths);
       for (let index = previous!.pageSignatures.length; index < data.pages.length; index += 1) {
         for (const item of data.pages[index].media) {
           if (seenPaths.has(item.path)) continue;
@@ -127,39 +147,32 @@ export function useCategoryMedia({
           appended.push(item);
         }
       }
-      touchCategoryAggregateCache(queryKeyId, {
+      aggregateRef.current = {
+        ...aggregateKey,
         pageSignatures,
         media: appended,
         seenPaths,
-      });
+      };
       return appended;
     }
 
     if (
-      sameQuery &&
+      sameKey &&
       previous!.pageSignatures.length === pageSignatures.length &&
       previous!.pageSignatures.every((signature, index) => signature === pageSignatures[index])
     ) {
-      touchCategoryAggregateCache(queryKeyId, previous!);
       return previous!.media;
     }
 
-    const rebuilt: MediaItem[] = [];
-    const seenPaths = new Set<string>();
-    for (const page of data.pages) {
-      for (const item of page.media) {
-        if (seenPaths.has(item.path)) continue;
-        seenPaths.add(item.path);
-        rebuilt.push(item);
-      }
-    }
-    touchCategoryAggregateCache(queryKeyId, {
+    const rebuilt = rebuildAggregateMedia(data.pages);
+    aggregateRef.current = {
+      ...aggregateKey,
       pageSignatures,
-      media: rebuilt,
-      seenPaths,
-    });
-    return rebuilt;
-  }, [data, queryKeyId]);
+      media: rebuilt.media,
+      seenPaths: rebuilt.seenPaths,
+    };
+    return rebuilt.media;
+  }, [backendSort, categoryPath, data, mediaFilter, rootVersion]);
 
   const categoryMedia = useMemo(
     () =>
@@ -185,15 +198,8 @@ export function useCategoryMedia({
     setCategoryPath(path);
   }, []);
 
-  const invalidateCategoryCache = useCallback(() => {
-    clearCategoryAggregateCache();
-    void queryClient.invalidateQueries({ queryKey: ["category"] });
-  }, [queryClient]);
-
   const refreshCategory = useCallback(
     async (candidatePaths: readonly string[], preferredPath: string | null): Promise<void> => {
-      invalidateCategoryCache();
-
       const nextPath =
         (preferredPath && candidatePaths.includes(preferredPath) ? preferredPath : null) ??
         candidatePaths[0] ??
@@ -204,11 +210,13 @@ export function useCategoryMedia({
         return;
       }
 
-      startTransition(() => {
-        setCategoryPath(nextPath);
-      });
+      if (nextPath !== categoryPath) {
+        startTransition(() => {
+          setCategoryPath(nextPath);
+        });
+      }
     },
-    [clearCategoryState, invalidateCategoryCache]
+    [categoryPath, clearCategoryState]
   );
 
   const loadMoreCategory = useCallback(async () => {
@@ -218,9 +226,8 @@ export function useCategoryMedia({
   }, [fetchNextPage, hasNextPage, isFetchingNextPage]);
 
   const resetCategory = useCallback(() => {
-    invalidateCategoryCache();
     clearCategoryState();
-  }, [clearCategoryState, invalidateCategoryCache]);
+  }, [clearCategoryState]);
 
   const categoryErrorStr = error ? (error instanceof Error ? error.message : "加载失败") : null;
 
@@ -239,7 +246,6 @@ export function useCategoryMedia({
     handleSelectCategory,
     restoreCategory,
     refreshCategory,
-    invalidateCategoryCache,
     loadMoreCategory,
     resetCategory,
   };

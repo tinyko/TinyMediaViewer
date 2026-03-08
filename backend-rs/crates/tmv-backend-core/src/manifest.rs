@@ -96,7 +96,7 @@ impl BackendService {
                     .build_directory_manifest(absolute_path, safe_relative_path, root_modified)
                     .await?;
                 self.persist_manifest(safe_relative_path, &rebuilt).await?;
-                self.install_manifest_watches(absolute_path, safe_relative_path, &rebuilt);
+                self.sync_manifest_watches(absolute_path, safe_relative_path, &rebuilt);
                 self.write_manifest_cache(
                     safe_relative_path.to_string(),
                     generation,
@@ -108,7 +108,7 @@ impl BackendService {
             let persisted = self.hydrate_manifest_record(&record)?;
             if (persisted.root_modified - root_modified).abs() < f64::EPSILON {
                 if allow_fast_restore {
-                    self.install_manifest_watches(absolute_path, safe_relative_path, &persisted);
+                    self.sync_manifest_watches(absolute_path, safe_relative_path, &persisted);
                     self.write_manifest_cache(
                         safe_relative_path.to_string(),
                         generation,
@@ -132,7 +132,7 @@ impl BackendService {
                         self.persist_manifest(safe_relative_path, &validated)
                             .await?;
                     }
-                    self.install_manifest_watches(absolute_path, safe_relative_path, &validated);
+                    self.sync_manifest_watches(absolute_path, safe_relative_path, &validated);
                     self.write_manifest_cache(
                         safe_relative_path.to_string(),
                         generation,
@@ -140,6 +140,8 @@ impl BackendService {
                     );
                     return Ok(validated);
                 }
+
+                self.watch_registry.clear_owner(safe_relative_path);
             }
         }
 
@@ -147,7 +149,7 @@ impl BackendService {
             .build_directory_manifest(absolute_path, safe_relative_path, root_modified)
             .await?;
         self.persist_manifest(safe_relative_path, &manifest).await?;
-        self.install_manifest_watches(absolute_path, safe_relative_path, &manifest);
+        self.sync_manifest_watches(absolute_path, safe_relative_path, &manifest);
         self.write_manifest_cache(safe_relative_path.to_string(), generation, manifest.clone());
         Ok(manifest)
     }
@@ -327,11 +329,7 @@ impl BackendService {
                 Ok(Some((validated, should_persist)))
                     if service.path_generation(&safe_relative_path) == generation =>
                 {
-                    service.install_manifest_watches(
-                        &absolute_path,
-                        &safe_relative_path,
-                        &validated,
-                    );
+                    service.sync_manifest_watches(&absolute_path, &safe_relative_path, &validated);
                     service.write_manifest_cache(
                         safe_relative_path.clone(),
                         generation,

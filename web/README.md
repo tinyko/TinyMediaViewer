@@ -6,7 +6,8 @@ React viewer for TinyMediaViewer.
 - API contracts come from `src/generated/tmv-contract.ts`.
 - Root accounts are fetched from `/api/root` into a normalized local store; category media is fetched from `/api/category` and paged through React Query, with cache keys partitioned by account path, media kind, sort direction and root version.
 - App-level orchestration is centralized in `src/features/session/useViewerSession.ts`; it coordinates root loading, category switching, refresh, favorites, persisted viewer preferences and the system usage modal.
-- Category paging keeps an append-only aggregate of loaded pages, so loading more media does not rebuild the entire client-side media array each time.
+- Category paging keeps an append-only aggregate of loaded pages for the current query key, so loading more media does not rebuild the entire client-side media array each time; switching to a different key rebuilds from the React Query pages for that key instead of using a separate module-level LRU cache.
+- The root account store keeps `subfoldersByPath + orderBy*` arrays, but preview backfill and favorite toggles patch only the affected paths into the sorted arrays instead of re-sorting the full account list.
 - The account list supports persisted favorites, and `按收藏` filters the list down to favorite accounts only.
 - The account list toolbar supports `按时间` / `按名称` / `按收藏` / `按随机`. Random mode uses a deterministic seed so the order stays stable until the random button is clicked again.
 - Account rows use a full-pill hit target for selection, while the favorite button remains an independent click target.
@@ -19,6 +20,7 @@ React viewer for TinyMediaViewer.
 - Opening the media preview modal locks background scrolling so touch gestures on tablets and phones do not scroll the underlying page.
 - Query-backed viewer preferences are centralized in `src/features/ui/useViewerPreferences.ts`; tests that exercise persisted UI state should mock the backend API, not `localStorage`.
 - App and hook tests that touch category queries need a `QueryClientProvider`; use `src/test/queryClient.tsx` instead of hand-rolling wrappers in each test.
+- `useCategoryMedia` no longer exposes a manual `invalidateCategoryCache`; refresh behavior is driven by `rootVersion` in the query key plus category restore/reselect logic.
 - Do not edit generated contracts by hand. Regenerate them from `backend-rs` with:
 ```bash
 cd ../backend-rs

@@ -82,7 +82,6 @@ export function useViewerSession({
     onSelectCategory,
     restoreCategory,
     refreshCategory,
-    invalidateCategoryCache,
     loadMoreCategory,
     resetCategory,
   } = useCategorySession({
@@ -240,7 +239,6 @@ export function useViewerSession({
     onCloseSystemUsage,
     onRefreshSystemUsage,
     onToggleFavorite,
-    invalidateCategoryCache,
     resetRootPreviewQueue,
   };
 }

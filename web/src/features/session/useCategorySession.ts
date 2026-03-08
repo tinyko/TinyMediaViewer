@@ -33,7 +33,6 @@ export function useCategorySession({
     handleSelectCategory,
     restoreCategory,
     refreshCategory,
-    invalidateCategoryCache,
     loadMoreCategory,
     resetCategory,
   } = useCategoryMedia({
@@ -80,7 +79,6 @@ export function useCategorySession({
     onSelectCategory,
     restoreCategory,
     refreshCategory,
-    invalidateCategoryCache,
     loadMoreCategory,
     resetCategory,
   };

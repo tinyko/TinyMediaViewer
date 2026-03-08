@@ -12,11 +12,12 @@
 ## 当前设计
 - 根目录列表走 `/api/root` 轻量摘要；分类媒体走 `/api/category` 服务端分页，避免首次加载就扫描整库。
 - `tmv-backend-core` 已经按职责拆成 `runtime`、`snapshot`、`manifest`、`preview`、`favorites`、`system_usage`、`diagnostics`、`thumbnail/*` 以及 `paths/media/scan/service_types` 等内部模块；`lib.rs` 只保留公开导出、`BackendService` 装配和少量共享入口。
-- 后端运行时缓存不再共用一把大锁：根目录 light snapshot、目录 manifest、folder preview 和 path generation 都按子系统拆开维护；watch 失效会级联路径 generation，收藏切换会显式打掉根目录 light snapshot。
+- 后端运行时缓存不再共用一把大锁：根目录 light snapshot、目录 manifest、folder preview 和 path generation 都按子系统拆开维护；folder preview 运行时缓存按 `path -> limit` 分桶，watch 失效会级联路径 generation 并清掉对应分类的 watch owner，收藏切换会显式打掉根目录 light snapshot。
 - 左侧账号列表和右侧媒体网格都做了虚拟化；根目录数据在前端走归一化 store，预览和计数按可见账号批量回填，回填队列会在超时或部分失败时自动降并发。
-- 分类媒体请求由 React Query 管理：`useInfiniteQuery` 负责分页、缓存和失效，查询 key 按账号路径、媒体类型、后端排序方向和根目录版本隔离；前端对已加载页做 append-only 聚合，并给聚合结果加了固定 24 项的 LRU 缓存，避免翻页时重建整段媒体数组，也避免旧 `rootVersion` 常驻内存。
+- 分类媒体请求由 React Query 管理：`useInfiniteQuery` 负责分页和缓存，查询 key 按账号路径、媒体类型、后端排序方向和根目录版本隔离；前端在 hook 内只维护当前 query key 的 append-only 聚合状态，同 key 翻页直接追加，切 key 后按 React Query 已缓存页重建，不再额外维护模块级 LRU 聚合缓存。
 - 左侧账号列表支持 `按时间`、`按名称`、`按收藏` 和 `按随机`。`按收藏` 会筛出收藏账号；`按随机` 使用稳定 seed 打散顺序，只有再次点击按钮才会重新洗牌。
 - 账号胶囊整行都可点击切换，右侧收藏按钮独立浮层可点；收藏状态通过 Rust backend 写入 SQLite 并持久化。
+- 根目录 store 仍保留 `subfoldersByPath + orderBy*` 结构，但预览回填和收藏切换已经改成增量 patch 排序数组，不再每次把整张账号表展开后全量重排。
 - 右侧媒体网格支持 `按时间+`、`按时间-` 和 `按随机`。媒体随机顺序在前端基于当前已加载条目稳定重排，再次点击按钮才会换一组，不会为重洗牌重新拉接口。
 - Viewer 的本地偏好通过 Rust backend 写入 SQLite：搜索词、账号排序、账号随机 seed、媒体筛选、媒体排序、媒体随机 seed、当前账号、主题、手动主题、特效模式和渲染器在刷新或重启后都会恢复。前端现在由 `useViewerSession` 作为 facade，内部拆成 `useRootSession`、`useCategorySession`、`useViewerPersistence`、`useAuthRedirect`、`useCategorySelectionCoordinator` 和 `useRefreshCoordinator`，不再把所有副作用塞进一个大 hook。
 - 工具栏提供“系统占用情况”弹窗，按默认媒体根目录统计账号总占用、图片占用、视频占用、其它占用，并展示单个账号的 Top 5 大文件；前端仍有 30 秒缓存，但后端现在会后台维护一份完整热快照，手动刷新会显式绕过缓存并等待最新一轮统计完成。
@@ -32,12 +33,12 @@
   Rust workspace，当前唯一后端主线。
   - `tmv-backend-app`: 可执行入口，提供 HTTP 服务和静态 viewer。
   - `tmv-backend-api`: Axum 路由层，暴露 `/api/root`、`/api/category`、`/api/folder/previews`、`/api/folder/favorite`、`/api/viewer-preferences`、`/api/system-usage`、`/__tmv/diag/*`、`/media/*`、`/thumb/*`。
-  - `tmv-backend-core`: 目录扫描、运行时缓存、分页、排序、预览构建、收藏状态叠加、viewer 偏好读写、系统占用热缓存、缩略图调度。内部已拆成多模块，不再是单文件大实现。
+  - `tmv-backend-core`: 目录扫描、运行时缓存、分页、排序、预览构建、收藏状态叠加、viewer 偏好读写、系统占用热缓存、缩略图调度。manifest watch 现在按 owner 同步目录集合，preview runtime cache 按路径分桶失效，内部已拆成多模块，不再是单文件大实现。
   - `tmv-backend-index`: SQLite 持久化，基于 `deadpool-sqlite` 保存索引、收藏、viewer 偏好、缩略图 job/asset 等本地状态；当前 schema `v6` 已清掉 manifest legacy blob 列。
-  - `tmv-backend-watch`: 文件系统 watch，目录变化时失效缓存。
+  - `tmv-backend-watch`: 文件系统 watch，按 owner 维护 watched 目录集合，目录变化时只命中相关分类并失效对应缓存。
   - `tmv-contract-export`: 从 Rust DTO 生成前端 TypeScript 契约。
 - `web/`
-  React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，分类媒体通过 React Query 分页缓存、append-only 聚合和 LRU 聚合缓存，账号和媒体列表都支持稳定随机重排，Viewer 偏好通过后端 SQLite 持久化，session 状态按 root/category/persistence/refresh/auth 协调拆开，特效层支持真实 `canvas2d/webgpu` 双分支。
+  React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，账号排序数组按增量 patch 维护；分类媒体通过 React Query 分页缓存和 hook 内 append-only 聚合管理，账号和媒体列表都支持稳定随机重排，Viewer 偏好通过后端 SQLite 持久化，session 状态按 root/category/persistence/refresh/auth 协调拆开，特效层支持真实 `canvas2d/webgpu` 双分支。
 - `desktop/`
   Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包，并在打包时把当前 `git rev-parse --short HEAD` 和 UTC 构建时间注入 viewer 指纹。
 - `archive/node-legacy/`

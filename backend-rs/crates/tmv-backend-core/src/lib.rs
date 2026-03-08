@@ -584,6 +584,9 @@ impl BackendService {
     }
 
     fn invalidate_runtime_path(&self, path: &str) {
+        if !path.is_empty() {
+            self.watch_registry.clear_owner(path);
+        }
         self.runtime.invalidate_path_and_ancestors(path);
         let system_usage_runtime = self.system_usage_runtime.clone();
         let root_generation = self.runtime.generation("");
@@ -610,18 +613,21 @@ impl BackendService {
         Ok((safe_relative_path, absolute_path))
     }
 
-    fn install_manifest_watches(
+    fn sync_manifest_watches(
         &self,
         absolute_path: &Path,
         safe_relative_path: &str,
         manifest: &DirectoryManifest,
     ) {
+        let mut directories = HashSet::from([absolute_path.to_path_buf()]);
+        directories.extend(
+            manifest
+                .watched_directories
+                .iter()
+                .map(|watched| watched.absolute_path.clone()),
+        );
         self.watch_registry
-            .watch_directory(absolute_path, safe_relative_path.to_string());
-        for watched in &manifest.watched_directories {
-            self.watch_registry
-                .watch_directory(&watched.absolute_path, safe_relative_path.to_string());
-        }
+            .replace_owner_directories(safe_relative_path.to_string(), directories);
     }
 
     fn path_generation(&self, path: &str) -> u64 {
@@ -1033,6 +1039,121 @@ mod tests {
         );
         #[cfg(test)]
         assert_eq!(service.favorite_set_load_count(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repeated_category_reloads_do_not_accumulate_manifest_watches() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        fs::create_dir_all(root.join("alpha/videos")).await?;
+        fs::write(root.join("alpha/images/a.jpg"), b"alpha-image").await?;
+        fs::write(root.join("alpha/videos/a.mp4"), b"alpha-video").await?;
+
+        let service = BackendService::new(
+            test_backend_config(root.clone(), thumbs),
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+
+        let _ = service
+            .get_category_page(
+                "alpha",
+                GetCategoryOptions {
+                    media_filter: FolderMediaFilter::Image,
+                    sort_order: FolderSortOrder::Desc,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let initial_watched_count = service.watch_registry.watched_directory_count();
+        let initial_owner_count = service.watch_registry.owner_directory_count("alpha");
+
+        assert!(initial_watched_count > 0);
+        assert!(initial_owner_count > 0);
+
+        let _ = service
+            .get_category_page(
+                "alpha",
+                GetCategoryOptions {
+                    media_filter: FolderMediaFilter::Image,
+                    sort_order: FolderSortOrder::Desc,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            service.watch_registry.watched_directory_count(),
+            initial_watched_count
+        );
+        assert_eq!(
+            service.watch_registry.owner_directory_count("alpha"),
+            initial_owner_count
+        );
+
+        service.invalidate_runtime_path("alpha");
+        assert_eq!(service.watch_registry.owner_directory_count("alpha"), 0);
+
+        let _ = service
+            .get_category_page(
+                "alpha",
+                GetCategoryOptions {
+                    media_filter: FolderMediaFilter::Image,
+                    sort_order: FolderSortOrder::Desc,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        assert_eq!(
+            service.watch_registry.watched_directory_count(),
+            initial_watched_count
+        );
+        assert_eq!(
+            service.watch_registry.owner_directory_count("alpha"),
+            initial_owner_count
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalidating_one_path_clears_only_its_preview_cache_bucket() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        fs::create_dir_all(root.join("beta/images")).await?;
+        fs::write(root.join("alpha/images/a.jpg"), b"alpha-image").await?;
+        fs::write(root.join("beta/images/b.jpg"), b"beta-image").await?;
+
+        let service = BackendService::new(
+            test_backend_config(root.clone(), thumbs),
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+
+        let result = service
+            .get_folder_previews(vec!["alpha".to_string(), "beta".to_string()], Some(2))
+            .await;
+        assert!(result.errors.is_empty());
+        assert_eq!(service.runtime.preview_cache_entry_count(), 2);
+        assert!(service.runtime.has_preview_cache_entry("alpha", 2));
+        assert!(service.runtime.has_preview_cache_entry("beta", 2));
+
+        service.invalidate_runtime_path("alpha");
+
+        assert_eq!(service.runtime.preview_cache_entry_count(), 1);
+        assert!(!service.runtime.has_preview_cache_entry("alpha", 2));
+        assert!(service.runtime.has_preview_cache_entry("beta", 2));
 
         Ok(())
     }
