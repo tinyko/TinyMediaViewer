@@ -1,35 +1,40 @@
-import { useCallback, useMemo } from "react";
+import { useCallback } from "react";
 import type { MediaItem } from "../../types";
 
 interface UseModalNavigationOptions {
-  selected: MediaItem | null;
+  selectedPath: string | null;
+  selectedIndex: number;
   media: MediaItem[];
   onSelect: (item: MediaItem | null) => void;
 }
 
-export function useModalNavigation({ selected, media, onSelect }: UseModalNavigationOptions) {
-  const selectedIndex = useMemo(
-    () => (selected ? media.findIndex((item) => item.path === selected.path) : -1),
-    [media, selected]
-  );
-
+export function useModalNavigation({
+  selectedPath,
+  selectedIndex,
+  media,
+  onSelect,
+}: UseModalNavigationOptions) {
   const onClose = useCallback(() => onSelect(null), [onSelect]);
 
   const onPrev = useCallback(() => {
-    if (!selected || selectedIndex <= 0) return;
-    onSelect(media[selectedIndex - 1]);
-  }, [media, onSelect, selected, selectedIndex]);
+    if (!selectedPath || selectedIndex <= 0) return;
+    const previous = media[selectedIndex - 1];
+    if (!previous) return;
+    onSelect(previous);
+  }, [media, onSelect, selectedIndex, selectedPath]);
 
   const onNext = useCallback(() => {
-    if (!selected || selectedIndex < 0 || selectedIndex >= media.length - 1) return;
-    onSelect(media[selectedIndex + 1]);
-  }, [media, onSelect, selected, selectedIndex]);
+    if (!selectedPath || selectedIndex < 0 || selectedIndex >= media.length - 1) return;
+    const next = media[selectedIndex + 1];
+    if (!next) return;
+    onSelect(next);
+  }, [media, onSelect, selectedIndex, selectedPath]);
 
   return {
     onClose,
     onPrev,
     onNext,
-    hasPrev: selectedIndex > 0,
-    hasNext: selectedIndex > -1 && selectedIndex < media.length - 1,
+    hasPrev: Boolean(selectedPath) && selectedIndex > 0,
+    hasNext: Boolean(selectedPath) && selectedIndex > -1 && selectedIndex < media.length - 1,
   };
 }

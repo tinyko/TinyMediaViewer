@@ -171,4 +171,53 @@ describe("useThemeAndPerf", () => {
       expect(screen.getByTestId("renderer-label")).toHaveTextContent("WG×");
     });
   });
+
+  it("falls back to canvas2d when navigator.gpu is unavailable", async () => {
+    const context2d = make2dContext();
+
+    HTMLCanvasElement.prototype.getContext = vi.fn(function getContext(kind: string) {
+      if (kind === "2d") return context2d;
+      return null;
+    }) as typeof HTMLCanvasElement.prototype.getContext;
+
+    function Harness() {
+      const {
+        effectsRenderer,
+        resolvedRenderer,
+        reportResolvedRenderer,
+      } = useThemeAndPerf({
+        initialPreferences: makeViewerPreferences({
+          effectsRenderer: "webgpu",
+        }),
+        preferencesReady: true,
+      });
+
+      return (
+        <>
+          <div data-testid="renderer-label">
+            {effectsRenderer === "webgpu"
+              ? resolvedRenderer === "webgpu"
+                ? "WG"
+                : "WG×"
+              : "2D"}
+          </div>
+          <EffectsStage
+            enabled={false}
+            requestedRenderer={effectsRenderer}
+            hoveredCardRef={createRef<HTMLButtonElement>()}
+            onHueChange={() => undefined}
+            onResolvedRendererChange={reportResolvedRenderer}
+            cursorOffset={{ x: 0, y: 0 }}
+            pulseOffsetY={0}
+          />
+        </>
+      );
+    }
+
+    render(<Harness />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("renderer-label")).toHaveTextContent("WG×");
+    });
+  });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import "./App.css";
@@ -54,6 +54,9 @@ const statusTextMap: Record<RuntimeStatus, string> = {
   stopped: "已停止",
   error: "异常",
 };
+const STARTING_RETRY_INTERVAL_MS = 3_000;
+const STARTING_RETRY_WINDOW_MS = 30_000;
+const VISIBILITY_REFRESH_STALE_MS = 30_000;
 
 function App() {
   const [state, setState] = useState<AppState | null>(null);
@@ -71,14 +74,58 @@ function App() {
     viewerAccessMode: "local",
     lanPassword: "",
   });
+  const lastSuccessfulSyncAtRef = useRef(0);
+  const refreshStateRef = useRef<() => Promise<AppState | null>>(async () => null);
+  const startingRetryTimerRef = useRef<number | null>(null);
+  const startingRetryDeadlineRef = useRef(0);
+
+  const stopStartingRetryWindow = useCallback(() => {
+    if (startingRetryTimerRef.current !== null) {
+      window.clearInterval(startingRetryTimerRef.current);
+      startingRetryTimerRef.current = null;
+    }
+    startingRetryDeadlineRef.current = 0;
+  }, []);
+
+  const syncStartingRetryWindow = useCallback((status: RuntimeStatus) => {
+    if (status !== "starting") {
+      stopStartingRetryWindow();
+      return;
+    }
+
+    const now = Date.now();
+    if (
+      startingRetryTimerRef.current !== null &&
+      startingRetryDeadlineRef.current > now
+    ) {
+      return;
+    }
+
+    stopStartingRetryWindow();
+    startingRetryDeadlineRef.current = now + STARTING_RETRY_WINDOW_MS;
+    startingRetryTimerRef.current = window.setInterval(() => {
+      if (Date.now() >= startingRetryDeadlineRef.current) {
+        stopStartingRetryWindow();
+        return;
+      }
+
+      refreshStateRef.current().catch(() => {
+        if (Date.now() >= startingRetryDeadlineRef.current) {
+          stopStartingRetryWindow();
+        }
+      });
+    }, STARTING_RETRY_INTERVAL_MS);
+  }, [stopStartingRetryWindow]);
 
   const applyRemoteState = useCallback((next: AppState, nextDiagnostics: DiagnosticsState | null) => {
     setState(next);
     setDiagnostics(nextDiagnostics);
+    lastSuccessfulSyncAtRef.current = Date.now();
+    syncStartingRetryWindow(next.runtime.status);
     if (!formDirty) {
       setForm(next.settings);
     }
-  }, [formDirty]);
+  }, [formDirty, syncStartingRetryWindow]);
 
   const refreshState = useCallback(async () => {
     const [next, nextDiagnostics] = await Promise.all([
@@ -86,9 +133,13 @@ function App() {
       invoke<DiagnosticsState>("get_diagnostics_state").catch(() => null),
     ]);
     applyRemoteState(next, nextDiagnostics);
+    return next;
   }, [applyRemoteState]);
+  refreshStateRef.current = refreshState;
 
   useEffect(() => {
+    let mounted = true;
+
     const init = async () => {
       try {
         setLoading(true);
@@ -97,11 +148,13 @@ function App() {
         const detail = err instanceof Error ? err.message : String(err);
         setError(`读取状态失败: ${detail}`);
       } finally {
-        setLoading(false);
+        if (mounted) {
+          setLoading(false);
+        }
       }
     };
 
-    init();
+    void init();
 
     const unlistenPromise = listen<AppState>("app-state-updated", (event) => {
       invoke<DiagnosticsState>("get_diagnostics_state")
@@ -111,19 +164,28 @@ function App() {
         });
     });
 
-    const poll = window.setInterval(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      if (Date.now() - lastSuccessfulSyncAtRef.current <= VISIBILITY_REFRESH_STALE_MS) {
+        return;
+      }
       refreshState().catch(() => {
-        // Ignore polling errors. User-triggered actions surface concrete errors.
+        // Ignore visibility refresh failures. User-triggered actions surface concrete errors.
       });
-    }, 3000);
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
-      window.clearInterval(poll);
+      mounted = false;
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      stopStartingRetryWindow();
       unlistenPromise.then((unlisten) => unlisten()).catch(() => {
         // no-op
       });
     };
-  }, [refreshState]);
+  }, [applyRemoteState, refreshState, stopStartingRetryWindow]);
 
   const statusText = useMemo(() => {
     if (!state) return "未知";
@@ -146,14 +208,19 @@ function App() {
       setState(next);
       setForm(next.settings);
       setFormDirty(false);
+      lastSuccessfulSyncAtRef.current = Date.now();
+      syncStartingRetryWindow(next.runtime.status);
       setMessage("设置已保存并重启服务");
+      void refreshState().catch(() => {
+        // Ignore background sync failures after a successful save.
+      });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setError(`保存失败: ${detail}`);
     } finally {
       setSaving(false);
     }
-  }, [form]);
+  }, [form, refreshState, syncStartingRetryWindow]);
 
   const restartService = useCallback(async () => {
     try {
@@ -161,15 +228,20 @@ function App() {
       setMessage(null);
       const next = await invoke<AppState>("restart_services");
       setState(next);
+      lastSuccessfulSyncAtRef.current = Date.now();
+      syncStartingRetryWindow(next.runtime.status);
       if (!formDirty) {
         setForm(next.settings);
       }
       setMessage("服务已重启");
+      void refreshState().catch(() => {
+        // Ignore background sync failures after a successful restart.
+      });
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       setError(`重启失败: ${detail}`);
     }
-  }, [formDirty]);
+  }, [formDirty, refreshState, syncStartingRetryWindow]);
 
   const pickHomeDirectory = useCallback(async () => {
     try {

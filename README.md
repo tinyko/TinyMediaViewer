@@ -21,7 +21,9 @@
 - 右侧媒体网格支持 `按时间+`、`按时间-` 和 `按随机`。媒体随机顺序在前端基于当前已加载条目稳定重排，再次点击按钮才会换一组，不会为重洗牌重新拉接口。
 - Viewer 的本地偏好通过 Rust backend 写入 SQLite：搜索词、账号排序、账号随机 seed、媒体筛选、媒体排序、媒体随机 seed、当前账号、主题、手动主题、特效模式和渲染器在刷新或重启后都会恢复。前端现在由 `useViewerSession` 作为 facade，内部拆成 `useRootSession`、`useCategorySession`、`useViewerPersistence`、`useAuthRedirect`、`useCategorySelectionCoordinator` 和 `useRefreshCoordinator`，不再把所有副作用塞进一个大 hook。
 - 工具栏提供“系统占用情况”弹窗，按默认媒体根目录统计账号总占用、图片占用、视频占用、其它占用，并展示单个账号的 Top 5 大文件；前端仍有 30 秒缓存，但后端现在会后台维护一份完整热快照，手动刷新会显式绕过缓存并等待最新一轮统计完成。
-- 前端特效层已经收口成共享 `EffectsStage`，默认请求 `webgpu`，初始化失败时自动回退到 `canvas2d`，工具栏显示 `WG×`。
+- 前端特效层已经收口成共享 `EffectsStage`，默认请求 `webgpu`，初始化失败时自动回退到 `canvas2d`，工具栏显示 `WG×`；当前 `webgpu` 分支已经改成实例化 GPU 绘制，不再走“先用 2D canvas 光栅化整帧，再上传纹理”的伪 GPU 路径。
+- `EffectsStage`、媒体预览弹窗和系统占用弹窗已经改成按需加载，viewer 首屏主包不再把这几个可选子系统一起打进去。
+- 预览态的当前项同步和前后导航已经改成基于 `path -> index` 的 O(1) 索引，不再在大媒体数组上做 `find/findIndex` 线性扫描。
 - 前后端契约由 Rust DTO 生成 TypeScript 文件，前端不再依赖旧的 `shared-types` 包。
 - 桌面端和开发态都只走 Rust backend，不再依赖旧的 Node/Fastify 服务链路。
 - 缩略图链路不再依赖 `ffmpeg`：图片和 GIF 首帧由 Rust 本地生成，macOS 上的视频缩略图走 AVFoundation；视频缩略图按 `/thumb/*` 请求懒生成并缓存到文件系统和 SQLite。
@@ -40,7 +42,7 @@
 - `web/`
   React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，账号排序数组按增量 patch 维护；分类媒体通过 React Query 分页缓存和 hook 内 append-only 聚合管理，账号和媒体列表都支持稳定随机重排，Viewer 偏好通过后端 SQLite 持久化，session 状态按 root/category/persistence/refresh/auth 协调拆开，特效层支持真实 `canvas2d/webgpu` 双分支。
 - `desktop/`
-  Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包，并在打包时把当前 `git rev-parse --short HEAD` 和 UTC 构建时间注入 viewer 指纹。
+  Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包，并在打包时把当前 `git rev-parse --short HEAD` 和 UTC 构建时间注入 viewer 指纹。设置面板的状态同步已经收口成事件优先模型：常态下不再做固定轮询，只在启动态限时补拉、窗口重新可见且数据过旧时兜底刷新。
 - `archive/node-legacy/`
   归档的 Node/Fastify 旧实现，仅作历史参考，不参与主线运行、构建或 CI。目录内仍保留 legacy smoke 脚本，脚本会自行构建依赖的后端并在失败时保存错误截图。
 

@@ -7,6 +7,7 @@ Tauri tray application for TinyMediaViewer.
 - Persist local settings and diagnostics
 - Open the local viewer URL and expose runtime state to the settings UI
 - Bundle the same Rust backend that now persists viewer preferences, favorites, thumbnail state and other local metadata into SQLite
+- Keep the settings panel in sync with the runtime through an event-first refresh model instead of a permanent steady-state polling loop
 
 ## Packaging
 ```bash
@@ -24,8 +25,10 @@ npm run build:dmg
 The desktop bundle does not require a separately installed `ffmpeg`. Image and GIF thumbnails are generated inside the Rust backend, and macOS video thumbnails use AVFoundation.
 
 Viewer UI state is also restored through the bundled backend. Search text, sort/filter mode, current account, theme, effects mode and renderer are saved through `/api/viewer-preferences` into the SQLite index, so refreshes and app relaunches keep the same viewer state without relying on browser `localStorage`.
-The bundled viewer also includes the current root/category API split, append-only category paging, the system usage refresh path, and the scroll-locked media preview modal used by the web build.
+The bundled viewer also includes the current root/category API split, append-only category paging, lazy-loaded preview/system-usage/effects chunks, the system usage refresh path, true WebGPU-or-canvas2d effects rendering, and the scroll-locked media preview modal used by the web build.
 
 ## Notes
 - `npm run build:dmg` is the normal packaging entry. It runs `prepare:bundle` first and then calls `tauri build --target aarch64-apple-darwin`.
+- The settings window refreshes state on initial load, on `app-state-updated` events, after save/restart actions, and when the window becomes visible after stale data; only the `starting` runtime state enables a bounded retry window.
 - The viewer build fingerprint comes from `git rev-parse --short HEAD` plus the current UTC time. If you build from a dirty worktree, the UI still shows the last commit hash.
+- The default DMG output path is `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/TinyMediaViewer_0.1.0_aarch64.dmg`.

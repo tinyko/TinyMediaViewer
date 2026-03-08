@@ -1,5 +1,6 @@
 import { type RefObject, useEffect, useRef, useState } from "react";
 import type { EffectsRenderer } from "../../types";
+import "./effects.css";
 import {
   createEffectsRenderer,
   type EffectsHeart,

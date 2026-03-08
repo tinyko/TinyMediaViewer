@@ -940,7 +940,7 @@ describe("App root light mode + preview backfill", () => {
 
     const mediaName = await screen.findByText("Visible.jpg");
     await userEvent.click(mediaName);
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "刷新" }));
 
@@ -948,6 +948,58 @@ describe("App root light mode + preview backfill", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
+  });
+
+  it("keeps preview navigation stable when the selected path still exists after refresh", async () => {
+    let alphaCalls = 0;
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          ...makeLightRootPayload().subfolders[0],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 3, gifs: 0, videos: 0, subfolders: 0 },
+        },
+      ])
+    );
+    mockedFetchCategoryPage.mockImplementation((targetPath) => {
+      alphaCalls += 1;
+      const refreshedSelected = {
+        ...makeMedia("B.jpg", "image"),
+        modified: Date.now() + alphaCalls,
+      };
+      return Promise.resolve(
+        alphaCalls === 1
+          ? makeCategoryPayloadWithMedia(targetPath, [
+              makeMedia("A.jpg", "image"),
+              makeMedia("B.jpg", "image"),
+              makeMedia("C.jpg", "image"),
+            ])
+          : makeCategoryPayloadWithMedia(targetPath, [
+              makeMedia("A.jpg", "image"),
+              refreshedSelected,
+              makeMedia("C.jpg", "image"),
+            ])
+      );
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    renderWithQueryClient(<App />);
+
+    await screen.findByText("A.jpg");
+    await userEvent.click(screen.getByText("B.jpg"));
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByLabelText("下一张"));
+    expect((await screen.findAllByText("C.jpg")).length).toBeGreaterThan(0);
+
+    await userEvent.click(screen.getByLabelText("上一张"));
+    expect((await screen.findAllByText("B.jpg")).length).toBeGreaterThan(0);
+
+    await userEvent.click(screen.getByRole("button", { name: "刷新" }));
+
+    expect((await screen.findAllByText("B.jpg")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
   it("opens the system usage modal and shows ranked account usage with top files", async () => {

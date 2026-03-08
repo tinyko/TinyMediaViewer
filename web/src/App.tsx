@@ -1,19 +1,17 @@
 import {
+  Suspense,
+  lazy,
   useCallback,
   useMemo,
   useRef,
   useState,
 } from "react";
 import "./App.css";
-import "./features/effects/effects.css";
 import type { MediaItem } from "./types";
-import { MediaPreviewModal } from "./features/preview/MediaPreviewModal";
 import { useModalNavigation } from "./features/preview/useModalNavigation";
-import { EffectsStage } from "./features/effects/EffectsStage";
 import { useThemeAndPerf } from "./features/ui/useThemeAndPerf";
 import { useViewerPreferences } from "./features/ui/useViewerPreferences";
 import { useAppInteractions } from "./features/ui/useAppInteractions";
-import { SystemUsageModal } from "./features/systemUsage/SystemUsageModal";
 import { useViewerSession } from "./features/session/useViewerSession";
 import { Toolbar } from "./components/Toolbar";
 import { MainContent } from "./components/MainContent";
@@ -24,6 +22,18 @@ const HEART_PULSE_OFFSET_Y = 0;
 const APP_VERSION = import.meta.env.VITE_TMV_APP_VERSION ?? "0.1.0";
 const APP_SHORT_COMMIT = import.meta.env.VITE_TMV_SHORT_COMMIT ?? "dev";
 const APP_BUILD_TIME = import.meta.env.VITE_TMV_BUILD_TIME ?? "unknown";
+const EffectsStage = lazy(async () => {
+  const module = await import("./features/effects/EffectsStage");
+  return { default: module.EffectsStage };
+});
+const MediaPreviewModal = lazy(async () => {
+  const module = await import("./features/preview/MediaPreviewModal");
+  return { default: module.MediaPreviewModal };
+});
+const SystemUsageModal = lazy(async () => {
+  const module = await import("./features/systemUsage/SystemUsageModal");
+  return { default: module.SystemUsageModal };
+});
 
 function App() {
   const viewerPreferencesQuery = useViewerPreferences();
@@ -107,6 +117,7 @@ function App() {
 
   const versionLabel = `v${APP_VERSION}`;
   const versionFingerprint = `${versionLabel}+${APP_SHORT_COMMIT} (${APP_BUILD_TIME})`;
+  const shouldRenderEffectsStage = themePreferencesHydrated && effectsEnabled;
 
   const onVisibleCardsChange = useCallback(
     (count: number) => reportVisibleCards(count),
@@ -119,6 +130,14 @@ function App() {
     setManualTheme(true);
     setTheme(theme === "light" ? "dark" : "light");
   }, [setManualTheme, setTheme, theme]);
+  const mediaIndexByPath = useMemo(() => {
+    const indexByPath = new Map<string, number>();
+    categoryMedia.forEach((item, index) => {
+      indexByPath.set(item.path, index);
+    });
+    return indexByPath;
+  }, [categoryMedia]);
+  const selectedIndex = selected ? (mediaIndexByPath.get(selected.path) ?? -1) : -1;
   const activeSelected = useMemo(() => {
     if (!selected) return null;
     if (!categoryPath) {
@@ -128,10 +147,10 @@ function App() {
       return categoryPreview ? selected : null;
     }
 
-    const updated = categoryMedia.find((item) => item.path === selected.path);
-    if (!updated) {
+    if (selectedIndex < 0) {
       return null;
     }
+    const updated = categoryMedia[selectedIndex];
 
     if (
       updated.modified !== selected.modified ||
@@ -143,7 +162,10 @@ function App() {
     }
 
     return selected;
-  }, [categoryMedia, categoryPath, categoryPreview, selected]);
+  }, [categoryMedia, categoryPath, categoryPreview, selected, selectedIndex]);
+  const activeSelectedIndex = activeSelected
+    ? (mediaIndexByPath.get(activeSelected.path) ?? -1)
+    : -1;
 
   const scrollTrackingKey = `${categoryPreview?.folder.path ?? "-"}|${mediaFilter}|${mediaSort}|${sortMode}`;
   const {
@@ -161,23 +183,28 @@ function App() {
     scrollTrackingKey,
   });
   const { onClose, onPrev, onNext, hasPrev, hasNext } = useModalNavigation({
-    selected: activeSelected,
+    selectedPath: activeSelected?.path ?? null,
+    selectedIndex: activeSelectedIndex,
     media: categoryMedia,
     onSelect: setSelected,
   });
 
   return (
     <div className="page">
-      <EffectsStage
-        enabled={effectsEnabled}
-        requestedRenderer={effectsRenderer}
-        hoveredCardRef={hoveredCardRef}
-        onHueChange={onHeartHueChange}
-        onResolvedRendererChange={reportResolvedRenderer}
-        cursorOffset={CURSOR_OFFSET}
-        pulseOffsetY={HEART_PULSE_OFFSET_Y}
-      />
-      {effectsEnabled && heartCursorVisible && (
+      {shouldRenderEffectsStage && (
+        <Suspense fallback={null}>
+          <EffectsStage
+            enabled={effectsEnabled}
+            requestedRenderer={effectsRenderer}
+            hoveredCardRef={hoveredCardRef}
+            onHueChange={onHeartHueChange}
+            onResolvedRendererChange={reportResolvedRenderer}
+            cursorOffset={CURSOR_OFFSET}
+            pulseOffsetY={HEART_PULSE_OFFSET_Y}
+          />
+        </Suspense>
+      )}
+      {shouldRenderEffectsStage && heartCursorVisible && (
         <div
           ref={heartCursorRef}
           className="cursor-heart-overlay"
@@ -241,29 +268,37 @@ function App() {
         onVisibleCardsChange={onVisibleCardsChange}
       />
 
-      <MediaPreviewModal
-        media={activeSelected}
-        onClose={onClose}
-        onPrev={onPrev}
-        onNext={onNext}
-        hasPrev={hasPrev}
-        hasNext={hasNext}
-      />
+      {activeSelected && (
+        <Suspense fallback={null}>
+          <MediaPreviewModal
+            media={activeSelected}
+            onClose={onClose}
+            onPrev={onPrev}
+            onNext={onNext}
+            hasPrev={hasPrev}
+            hasNext={hasNext}
+          />
+        </Suspense>
+      )}
 
-      <SystemUsageModal
-        open={showSystemUsage}
-        report={systemUsageQuery.data ?? null}
-        loading={systemUsageQuery.isLoading || systemUsageQuery.isFetching}
-        error={
-          systemUsageQuery.error instanceof Error
-            ? systemUsageQuery.error.message
-            : systemUsageQuery.error
-              ? "系统占用统计失败"
-              : null
-        }
-        onClose={onCloseSystemUsage}
-        onRefresh={onRefreshSystemUsage}
-      />
+      {showSystemUsage && (
+        <Suspense fallback={null}>
+          <SystemUsageModal
+            open={showSystemUsage}
+            report={systemUsageQuery.data ?? null}
+            loading={systemUsageQuery.isLoading || systemUsageQuery.isFetching}
+            error={
+              systemUsageQuery.error instanceof Error
+                ? systemUsageQuery.error.message
+                : systemUsageQuery.error
+                  ? "系统占用统计失败"
+                  : null
+            }
+            onClose={onCloseSystemUsage}
+            onRefresh={onRefreshSystemUsage}
+          />
+        </Suspense>
+      )}
 
       {showScrollTop && (
         <button className="scroll-top" onClick={scrollToTop} aria-label="回到顶部">
