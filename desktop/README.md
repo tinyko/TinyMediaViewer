@@ -6,6 +6,7 @@ Tauri tray application for TinyMediaViewer.
 - Launch the bundled Rust sidecar `tmv-backend-app`
 - Persist local settings and diagnostics
 - Open the local viewer URL and expose runtime state to the settings UI
+- Bundle the same Rust backend that now persists viewer preferences, favorites, thumbnail state and other local metadata into SQLite
 
 ## Packaging
 ```bash
@@ -21,6 +22,8 @@ npm run build:dmg
 - Injects `VITE_TMV_APP_VERSION`, `VITE_TMV_SHORT_COMMIT` and `VITE_TMV_BUILD_TIME` so the viewer can show a build fingerprint
 
 The desktop bundle does not require a separately installed `ffmpeg`. Image and GIF thumbnails are generated inside the Rust backend, and macOS video thumbnails use AVFoundation.
+
+Viewer UI state is also restored through the bundled backend. Search text, sort/filter mode, current account, theme, effects mode and renderer are saved through `/api/viewer-preferences` into the SQLite index, so refreshes and app relaunches keep the same viewer state without relying on browser `localStorage`.
 
 ## Notes
 - `npm run build:dmg` is the normal packaging entry. It runs `prepare:bundle` first and then calls `tauri build --target aarch64-apple-darwin`.

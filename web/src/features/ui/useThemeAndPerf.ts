@@ -1,57 +1,47 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { postPerfDiagnostics } from "../../api";
-import type { EffectsMode, EffectsRenderer, PerfDiagEvent } from "../../types";
+import type {
+  EffectsMode,
+  EffectsRenderer,
+  PerfDiagEvent,
+  ViewerPreferences,
+  ViewerTheme,
+} from "../../types";
 
-type Theme = "light" | "dark";
+type Theme = ViewerTheme;
+type ThemePreferences = Pick<
+  ViewerPreferences,
+  "theme" | "manualTheme" | "effectsMode" | "effectsRenderer"
+>;
 
 const PERF_SAMPLE_INTERVAL_MS = 10_000;
 const AUTO_LONG_TASK_THRESHOLD = 8;
-const RENDERER_MIGRATION_KEY = "mv-effects-renderer-migrated-v1";
 
-const getInitialTheme = (): Theme => {
+const getSystemTheme = (): Theme => {
   if (typeof window === "undefined") return "light";
-  const stored = window.localStorage.getItem("mv-theme");
-  if (stored === "light" || stored === "dark") return stored;
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
-};
-
-const getInitialEffectsMode = (): EffectsMode => {
-  if (typeof window === "undefined") return "auto";
-  const stored = window.localStorage.getItem("mv-effects-mode");
-  if (stored === "auto" || stored === "off" || stored === "full") return stored;
-
-  // Compatibility with legacy low-performance switch.
-  const legacy = window.localStorage.getItem("mv-low-performance");
-  if (legacy === "false") return "full";
-  return "auto";
-};
-
-const getInitialRenderer = (): EffectsRenderer => {
-  if (typeof window === "undefined") return "webgpu";
-  if (window.localStorage.getItem(RENDERER_MIGRATION_KEY) !== "true") {
-    window.localStorage.setItem("mv-effects-renderer", "webgpu");
-    window.localStorage.setItem(RENDERER_MIGRATION_KEY, "true");
-    return "webgpu";
-  }
-  const stored = window.localStorage.getItem("mv-effects-renderer");
-  if (stored === "webgpu" || stored === "canvas2d") return stored;
-  return "webgpu";
 };
 
 const round = (value: number) => Math.round(value * 100) / 100;
 
-export function useThemeAndPerf() {
-  const [theme, setTheme] = useState<Theme>(getInitialTheme);
-  const [manualTheme, setManualTheme] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem("mv-theme-manual") === "true";
-  });
+interface UseThemeAndPerfOptions {
+  initialPreferences?: ThemePreferences | null;
+  preferencesReady?: boolean;
+}
 
-  const [effectsMode, setEffectsMode] = useState<EffectsMode>(getInitialEffectsMode);
-  const [effectsRenderer, setEffectsRenderer] = useState<EffectsRenderer>(getInitialRenderer);
-  const [resolvedRenderer, setResolvedRenderer] = useState<EffectsRenderer>(getInitialRenderer);
+export function useThemeAndPerf({
+  initialPreferences = null,
+  preferencesReady = true,
+}: UseThemeAndPerfOptions = {}) {
+  const [theme, setTheme] = useState<Theme>(getSystemTheme);
+  const [manualTheme, setManualTheme] = useState(false);
+  const [effectsMode, setEffectsMode] = useState<EffectsMode>("auto");
+  const [effectsRenderer, setEffectsRenderer] = useState<EffectsRenderer>("webgpu");
+  const [resolvedRenderer, setResolvedRenderer] = useState<EffectsRenderer>("webgpu");
   const [autoEffectsDisabled, setAutoEffectsDisabled] = useState(false);
   const [perfNotice, setPerfNotice] = useState<string | null>(null);
+  const [preferencesHydrated, setPreferencesHydrated] = useState(false);
+  const hydratedPreferencesRef = useRef(false);
 
   const effectsEnabled =
     effectsMode === "full" ? true : effectsMode === "off" ? false : !autoEffectsDisabled;
@@ -82,23 +72,24 @@ export function useThemeAndPerf() {
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     document.documentElement.style.colorScheme = theme;
-    window.localStorage.setItem("mv-theme", theme);
-    window.localStorage.setItem("mv-theme-manual", manualTheme ? "true" : "false");
-  }, [theme, manualTheme]);
-
-  useEffect(() => {
-    window.localStorage.setItem("mv-effects-mode", effectsMode);
-    // Keep legacy key synchronized for backward compatibility.
-    window.localStorage.setItem("mv-low-performance", effectsMode === "full" ? "false" : "true");
-  }, [effectsMode]);
-
-  useEffect(() => {
-    window.localStorage.setItem("mv-effects-renderer", effectsRenderer);
-  }, [effectsRenderer]);
+  }, [theme]);
 
   useEffect(() => {
     setResolvedRenderer(effectsRenderer);
   }, [effectsRenderer]);
+
+  useEffect(() => {
+    if (hydratedPreferencesRef.current || !preferencesReady) return;
+    if (initialPreferences) {
+      setTheme(initialPreferences.theme);
+      setManualTheme(initialPreferences.manualTheme);
+      setEffectsMode(initialPreferences.effectsMode);
+      setEffectsRenderer(initialPreferences.effectsRenderer);
+      setResolvedRenderer(initialPreferences.effectsRenderer);
+    }
+    hydratedPreferencesRef.current = true;
+    setPreferencesHydrated(true);
+  }, [initialPreferences, preferencesReady]);
 
   useEffect(() => {
     if (manualTheme) return;
@@ -195,5 +186,6 @@ export function useThemeAndPerf() {
     autoEffectsDisabled,
     perfNotice,
     reportVisibleCards,
+    preferencesHydrated,
   };
 }

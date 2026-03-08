@@ -11,10 +11,11 @@ const isAbortError = (error: unknown) =>
 interface UseRootFolderOptions {
   onBeforeLoad?: () => void;
   onUnmount?: () => void;
+  enabled?: boolean;
 }
 
 export function useRootFolder(options: UseRootFolderOptions = {}) {
-  const { onBeforeLoad, onUnmount } = options;
+  const { onBeforeLoad, onUnmount, enabled = true } = options;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const store = useMemo(() => createRootFolderStore(), []);
@@ -54,12 +55,18 @@ export function useRootFolder(options: UseRootFolderOptions = {}) {
   }, [onBeforeLoad, store]);
 
   useEffect(() => {
+    if (!enabled) {
+      return () => {
+        abortRef.current?.abort();
+        onUnmount?.();
+      };
+    }
     void loadRoot();
     return () => {
       abortRef.current?.abort();
       onUnmount?.();
     };
-  }, [loadRoot, onUnmount]);
+  }, [enabled, loadRoot, onUnmount]);
 
   return {
     store,

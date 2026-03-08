@@ -5,30 +5,58 @@ import App from "./App";
 import {
   fetchFolder,
   fetchFolderPreviews,
+  fetchSystemUsage,
+  fetchViewerPreferences,
   postFolderFavorite,
   postPerfDiagnostics,
   postPreviewDiagnostics,
+  postViewerPreferences,
 } from "./api";
 import type {
   FolderPayload,
   FolderPreviewBatchOutput,
   MediaItem,
+  SystemUsageReport,
+  ViewerPreferences,
 } from "./types";
 import { renderWithQueryClient } from "./test/queryClient";
 
 vi.mock("./api", () => ({
   fetchFolder: vi.fn(),
   fetchFolderPreviews: vi.fn(),
+  fetchSystemUsage: vi.fn(),
+  fetchViewerPreferences: vi.fn(),
   postFolderFavorite: vi.fn(),
   postPreviewDiagnostics: vi.fn(),
   postPerfDiagnostics: vi.fn(),
+  postViewerPreferences: vi.fn(),
 }));
 
 const mockedFetchFolder = vi.mocked(fetchFolder);
 const mockedFetchFolderPreviews = vi.mocked(fetchFolderPreviews);
+const mockedFetchSystemUsage = vi.mocked(fetchSystemUsage);
+const mockedFetchViewerPreferences = vi.mocked(fetchViewerPreferences);
 const mockedPostFolderFavorite = vi.mocked(postFolderFavorite);
 const mockedPostPreviewDiagnostics = vi.mocked(postPreviewDiagnostics);
 const mockedPostPerfDiagnostics = vi.mocked(postPerfDiagnostics);
+const mockedPostViewerPreferences = vi.mocked(postViewerPreferences);
+
+const makeViewerPreferences = (
+  overrides: Partial<ViewerPreferences> = {}
+): ViewerPreferences => ({
+  search: "",
+  sortMode: "time",
+  randomSeed: 0,
+  mediaSort: "desc",
+  mediaRandomSeed: 0,
+  mediaFilter: "image",
+  categoryPath: undefined,
+  theme: "light",
+  manualTheme: false,
+  effectsMode: "auto",
+  effectsRenderer: "webgpu",
+  ...overrides,
+});
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
@@ -117,13 +145,62 @@ const readVisibleMediaOrder = () =>
     node.textContent?.trim() ?? ""
   );
 
+const makeSystemUsageReport = (): SystemUsageReport => ({
+  rootPath: "/Users/tiny/X",
+  generatedAt: new Date("2026-03-08T10:30:00Z").valueOf(),
+  items: [
+    {
+      account: "KaiyoYagi",
+      totalSize: 101_584_690_176,
+      imageSize: 27_956_701,
+      gifSize: 0,
+      videoSize: 101_556_730_287,
+      otherSize: 3_188,
+      topFiles: [
+        {
+          path: "videos/KaiyoYagi_20240710_062707_1810923689787240480_01.mp4",
+          size: 243_429_512,
+        },
+        {
+          path: "videos/KaiyoYagi_20251108_192700_1987240455067550186_01.mp4",
+          size: 103_776_256,
+        },
+      ],
+    },
+    {
+      account: "wAItercolor",
+      totalSize: 7_661_408_139,
+      imageSize: 6_966_773_104,
+      gifSize: 0,
+      videoSize: 694_635_035,
+      otherSize: 0,
+      topFiles: [
+        {
+          path: "videos/wAItercolor_20260127_123030_2016126668314968539_01.mp4",
+          size: 7_935_738,
+        },
+      ],
+    },
+  ],
+});
+
 describe("App root light mode + preview backfill", () => {
   beforeEach(() => {
     mockedFetchFolder.mockReset();
     mockedFetchFolderPreviews.mockReset();
+    mockedFetchSystemUsage.mockReset();
+    mockedFetchViewerPreferences.mockReset();
     mockedPostFolderFavorite.mockReset();
     mockedPostPreviewDiagnostics.mockReset();
     mockedPostPerfDiagnostics.mockReset();
+    mockedPostViewerPreferences.mockReset();
+    mockedFetchSystemUsage.mockResolvedValue(makeSystemUsageReport());
+    let persistedViewerPreferences = makeViewerPreferences();
+    mockedFetchViewerPreferences.mockImplementation(async () => persistedViewerPreferences);
+    mockedPostViewerPreferences.mockImplementation(async (input) => {
+      persistedViewerPreferences = input;
+      return input;
+    });
     mockedPostFolderFavorite.mockResolvedValue({ path: "alpha", favorite: true });
     mockedPostPreviewDiagnostics.mockResolvedValue();
     mockedPostPerfDiagnostics.mockResolvedValue();
@@ -843,6 +920,35 @@ describe("App root light mode + preview backfill", () => {
     });
   });
 
+  it("opens the system usage modal and shows ranked account usage with top files", async () => {
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        expect(options?.mode).toBe("light");
+        return Promise.resolve(makeLightRootPayload());
+      }
+      return Promise.resolve(makeCategoryPayload(targetPath));
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    renderWithQueryClient(<App />);
+
+    await screen.findByRole("button", { name: /^alpha/i });
+    await userEvent.click(screen.getByRole("button", { name: "系统占用情况" }));
+
+    expect(await screen.findByRole("dialog", { name: "系统占用情况" })).toBeInTheDocument();
+    expect((await screen.findAllByText("KaiyoYagi")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("94.61 GiB")).length).toBeGreaterThan(0);
+    expect(mockedFetchSystemUsage).toHaveBeenCalledWith(10);
+    expect(
+      screen.getByText("videos/KaiyoYagi_20240710_062707_1810923689787240480_01.mp4")
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByText("wAItercolor"));
+    expect(
+      screen.getByText("videos/wAItercolor_20260127_123030_2016126668314968539_01.mp4")
+    ).toBeInTheDocument();
+  });
+
   it("restarts root preview backfill after refresh and ignores stale preview batches", async () => {
     const firstPreviewDeferred = deferred<FolderPreviewBatchOutput>();
     const secondPreviewDeferred = deferred<FolderPreviewBatchOutput>();
@@ -921,5 +1027,91 @@ describe("App root light mode + preview backfill", () => {
 
     expect(await screen.findByText("🖼️ 1")).toBeInTheDocument();
     expect(screen.queryByText("🖼️ 9")).not.toBeInTheDocument();
+  });
+
+  it("restores persisted viewer selections after remount instead of falling back to defaults", async () => {
+    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
+      if (targetPath === "") {
+        expect(options?.mode).toBe("light");
+        return Promise.resolve(
+          makeRootPayloadWithSubfolders([
+            {
+              name: "alpha",
+              path: "alpha",
+              modified: 100,
+              counts: { images: 1, gifs: 0, videos: 1, subfolders: 0 },
+              previews: [],
+              countsReady: true,
+              previewReady: true,
+              favorite: false,
+            },
+            {
+              name: "beta",
+              path: "beta",
+              modified: 90,
+              counts: { images: 1, gifs: 0, videos: 1, subfolders: 0 },
+              previews: [],
+              countsReady: true,
+              previewReady: true,
+              favorite: false,
+            },
+          ])
+        );
+      }
+
+      if (targetPath === "alpha") {
+        return Promise.resolve(
+          makeCategoryPayloadWithMedia(
+            targetPath,
+            options?.kind === "video"
+              ? [makeMedia("Alpha.mp4", "video")]
+              : [makeMedia("Alpha.jpg", "image")]
+          )
+        );
+      }
+
+      if (targetPath === "beta") {
+        return Promise.resolve(
+          makeCategoryPayloadWithMedia(
+            targetPath,
+            options?.kind === "video"
+              ? [makeMedia("Beta.mp4", "video")]
+              : [makeMedia("Beta.jpg", "image")]
+          )
+        );
+      }
+
+      return Promise.reject(new Error(`Unexpected path: ${targetPath}`));
+    });
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+
+    const firstRender = renderWithQueryClient(<App />);
+
+    await screen.findByText("Alpha.jpg");
+    await userEvent.click(screen.getByRole("button", { name: /^beta/i }));
+    expect(await screen.findByText("Beta.jpg")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "视频" }));
+    expect(await screen.findByText("Beta.mp4")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "按时间+" }));
+    await waitFor(() => {
+      expect(mockedPostViewerPreferences).toHaveBeenCalledWith(
+        expect.objectContaining({
+          categoryPath: "beta",
+          mediaFilter: "video",
+          mediaSort: "asc",
+        })
+      );
+    });
+
+    firstRender.unmount();
+
+    renderWithQueryClient(<App />);
+
+    expect(await screen.findByText("Beta.mp4")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "视频" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "按时间+" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
   });
 });

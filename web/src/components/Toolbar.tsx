@@ -20,6 +20,7 @@ interface ToolbarProps {
   onReauthenticate: () => void;
   refreshing: boolean;
   onRefresh: () => void;
+  onOpenSystemUsage: () => void;
   sortMode: RootAccountSortMode;
   setSortMode: (mode: RootAccountSortMode) => void;
   onRandomizeAccounts: () => void;
@@ -58,6 +59,7 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
     onReauthenticate,
     refreshing,
     onRefresh,
+    onOpenSystemUsage,
     sortMode,
     setSortMode,
     onRandomizeAccounts,
@@ -179,6 +181,10 @@ export const Toolbar = memo(function Toolbar(props: ToolbarProps) {
             disabled={refreshing}
           >
             {refreshing ? "刷新中..." : "刷新"}
+          </button>
+
+          <button className="ghost-button" type="button" onClick={onOpenSystemUsage}>
+            系统占用情况
           </button>
 
           <div className="controls__cluster">

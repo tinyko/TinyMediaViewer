@@ -6,7 +6,8 @@ use tmv_backend_core::{
     FolderIdentity, FolderMediaFilter, FolderMode, FolderPayload, FolderPreview,
     FolderPreviewBatchError, FolderPreviewBatchInput, FolderPreviewBatchOutput, FolderTotals,
     MediaItem, MediaKind, PerfDiagEvent, PerfDiagEventsInput, PreviewDiagEvent,
-    PreviewDiagEventsInput, PreviewDiagPhase,
+    PreviewDiagEventsInput, PreviewDiagPhase, SystemUsageAccount, SystemUsageFile,
+    SystemUsageReport, ViewerAccountSortMode, ViewerMediaSortMode, ViewerPreferences, ViewerTheme,
 };
 use ts_rs::TS;
 
@@ -75,6 +76,13 @@ fn render_contracts() -> String {
         export_decl::<FolderPreviewBatchOutput>(),
         export_decl::<FolderFavoriteInput>(),
         export_decl::<FolderFavoriteOutput>(),
+        export_decl::<SystemUsageFile>(),
+        export_decl::<SystemUsageAccount>(),
+        export_decl::<SystemUsageReport>(),
+        export_decl::<ViewerAccountSortMode>(),
+        export_decl::<ViewerMediaSortMode>(),
+        export_decl::<ViewerTheme>(),
+        export_decl::<ViewerPreferences>(),
         export_decl::<PreviewDiagPhase>(),
         export_decl::<PreviewDiagEvent>(),
         export_decl::<PreviewDiagEventsInput>(),

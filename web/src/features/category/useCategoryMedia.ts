@@ -1,4 +1,9 @@
-import { useCallback, useMemo, useState, startTransition } from "react";
+import {
+  useCallback,
+  useMemo,
+  useState,
+  startTransition,
+} from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchFolder } from "../../api";
 import type { FolderPayload, MediaItem } from "../../types";
@@ -86,6 +91,10 @@ export function useCategoryMedia({
     });
   }, []);
 
+  const restoreCategory = useCallback((path: string | null) => {
+    setCategoryPath(path);
+  }, []);
+
   const invalidateCategoryCache = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["category"] });
   }, [queryClient]);
@@ -140,6 +149,7 @@ export function useCategoryMedia({
     categoryHasMore: !!hasNextPage,
     categoryError: categoryErrorStr,
     handleSelectCategory,
+    restoreCategory,
     refreshCategory,
     invalidateCategoryCache,
     loadMoreCategory,

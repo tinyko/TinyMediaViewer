@@ -29,7 +29,8 @@ pub use contracts::{
     FolderIdentity, FolderMediaFilter, FolderMode, FolderPayload, FolderPreview,
     FolderPreviewBatchError, FolderPreviewBatchInput, FolderPreviewBatchOutput, FolderTotals,
     MediaItem, MediaKind, PerfDiagEvent, PerfDiagEventsInput, PreviewDiagEvent,
-    PreviewDiagEventsInput, PreviewDiagPhase,
+    PreviewDiagEventsInput, PreviewDiagPhase, SystemUsageAccount, SystemUsageFile,
+    SystemUsageReport, ViewerAccountSortMode, ViewerMediaSortMode, ViewerPreferences, ViewerTheme,
 };
 pub use thumbnail::ThumbnailError;
 use thumbnail::{default_thumbnail_generator, ThumbnailGenerator};
@@ -145,6 +146,34 @@ impl BackendService {
             path: safe_relative_path,
             favorite,
         })
+    }
+
+    pub async fn get_system_usage_report(&self, limit: usize) -> Result<SystemUsageReport> {
+        let root_path = self.config.media_root.clone();
+        let max_items = limit.max(1);
+        tokio::task::spawn_blocking(move || build_system_usage_report(&root_path, max_items))
+            .await
+            .map_err(|error| anyhow!("join system usage scan task: {error}"))?
+    }
+
+    pub async fn load_viewer_preferences(&self) -> Result<ViewerPreferences> {
+        let Some(payload_json) = self.index.load_viewer_preferences().await? else {
+            return Ok(ViewerPreferences::default());
+        };
+        let parsed: ViewerPreferences =
+            serde_json::from_str(&payload_json).context("parse persisted viewer preferences")?;
+        sanitize_viewer_preferences(parsed)
+    }
+
+    pub async fn save_viewer_preferences(
+        &self,
+        preferences: ViewerPreferences,
+    ) -> Result<ViewerPreferences> {
+        let sanitized = sanitize_viewer_preferences(preferences)?;
+        let payload_json =
+            serde_json::to_string(&sanitized).context("serialize viewer preferences")?;
+        self.index.save_viewer_preferences(payload_json).await?;
+        Ok(sanitized)
     }
 }
 
@@ -1903,6 +1932,121 @@ fn detect_media_kind_from_path(path: &Path) -> Option<MediaKind> {
     }
 }
 
+fn build_system_usage_report(root: &Path, limit: usize) -> Result<SystemUsageReport> {
+    let mut items = Vec::new();
+    for entry in
+        std::fs::read_dir(root).with_context(|| format!("read media root {}", root.display()))?
+    {
+        let entry = entry.with_context(|| format!("read media root entry {}", root.display()))?;
+        let file_name = entry.file_name();
+        let account = file_name.to_string_lossy().into_owned();
+        if account.starts_with('.') {
+            continue;
+        }
+
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("read file type for {}", entry.path().display()))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        items.push(scan_system_usage_account(&account, &entry.path())?);
+    }
+
+    items.sort_by(|left, right| {
+        right
+            .total_size
+            .cmp(&left.total_size)
+            .then_with(|| left.account.cmp(&right.account))
+    });
+    items.truncate(limit);
+
+    Ok(SystemUsageReport {
+        root_path: root.display().to_string(),
+        generated_at: now_ms_u64(),
+        items,
+    })
+}
+
+fn scan_system_usage_account(account: &str, root: &Path) -> Result<SystemUsageAccount> {
+    let mut total_size = 0_u64;
+    let mut image_size = 0_u64;
+    let mut gif_size = 0_u64;
+    let mut video_size = 0_u64;
+    let mut other_size = 0_u64;
+    let mut top_files = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+
+    while let Some(current) = pending.pop() {
+        for entry in std::fs::read_dir(&current)
+            .with_context(|| format!("read account directory {}", current.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("read directory entry {}", current.display()))?;
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("read file type for {}", path.display()))?;
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            let metadata = entry
+                .metadata()
+                .with_context(|| format!("read metadata for {}", path.display()))?;
+            let size = metadata.len();
+            total_size = total_size.saturating_add(size);
+            match detect_media_kind_from_path(&path) {
+                Some(MediaKind::Image) => image_size = image_size.saturating_add(size),
+                Some(MediaKind::Gif) => gif_size = gif_size.saturating_add(size),
+                Some(MediaKind::Video) => video_size = video_size.saturating_add(size),
+                None => other_size = other_size.saturating_add(size),
+            }
+
+            let relative_path = path
+                .strip_prefix(root)
+                .unwrap_or(path.as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            remember_system_usage_top_file(&mut top_files, relative_path, size);
+        }
+    }
+
+    Ok(SystemUsageAccount {
+        account: account.to_string(),
+        total_size,
+        image_size,
+        gif_size,
+        video_size,
+        other_size,
+        top_files,
+    })
+}
+
+fn remember_system_usage_top_file(top_files: &mut Vec<SystemUsageFile>, path: String, size: u64) {
+    top_files.push(SystemUsageFile { path, size });
+    top_files.sort_by(|left, right| {
+        right
+            .size
+            .cmp(&left.size)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    if top_files.len() > 5 {
+        top_files.truncate(5);
+    }
+}
+
 fn build_media_item(
     name: &str,
     relative_path: &str,
@@ -2050,6 +2194,22 @@ fn normalize_relative_path(input: &str) -> Result<String> {
         }
     }
     Ok(parts.join("/"))
+}
+
+fn sanitize_viewer_preferences(mut preferences: ViewerPreferences) -> Result<ViewerPreferences> {
+    preferences.search = preferences.search.trim().to_string();
+    preferences.category_path = match preferences.category_path.take() {
+        Some(path) => {
+            let normalized = normalize_relative_path(&path)?;
+            if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            }
+        }
+        None => None,
+    };
+    Ok(preferences)
 }
 
 fn folder_identity(root: &Path, safe_relative_path: &str) -> FolderIdentity {
@@ -2318,13 +2478,14 @@ fn thumbnail_worker_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        modified_ms, page_media_for_filter, BackendConfig, BackendService, DiagnosticsWriter,
-        FolderMediaFilter, FolderMode, FolderSortOrder, GetFolderOptions, IndexStore, MediaItem,
-        MediaKind,
+        build_system_usage_report, modified_ms, page_media_for_filter, BackendConfig,
+        BackendService, DiagnosticsWriter, FolderMediaFilter, FolderMode, FolderSortOrder,
+        GetFolderOptions, IndexStore, MediaItem, MediaKind,
     };
     use crate::thumbnail::{ThumbnailError, ThumbnailGenerator};
     use anyhow::Result;
     use std::{
+        fs as stdfs,
         path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -2346,6 +2507,56 @@ mod tests {
             stat_concurrency: 8,
             thumbnail_cache_dir: thumbs,
         }
+    }
+
+    #[test]
+    fn system_usage_report_ranks_accounts_and_collects_top_files() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        stdfs::create_dir_all(root.join("alpha/images"))?;
+        stdfs::create_dir_all(root.join("alpha/videos"))?;
+        stdfs::create_dir_all(root.join("alpha/other"))?;
+        stdfs::create_dir_all(root.join("beta/images"))?;
+        stdfs::create_dir_all(root.join(".hidden/videos"))?;
+
+        stdfs::write(root.join("alpha/images/pic.jpg"), vec![0_u8; 10])?;
+        stdfs::write(root.join("alpha/images/anim.gif"), vec![0_u8; 7])?;
+        stdfs::write(root.join("alpha/videos/clip.mp4"), vec![0_u8; 30])?;
+        stdfs::write(root.join("alpha/other/readme.txt"), vec![0_u8; 5])?;
+        stdfs::write(root.join("beta/images/cover.png"), vec![0_u8; 12])?;
+        stdfs::write(root.join(".hidden/videos/skip.mp4"), vec![0_u8; 200])?;
+
+        let report = build_system_usage_report(root, 10)?;
+        assert_eq!(
+            report.items.len(),
+            2,
+            "hidden directories should be ignored"
+        );
+        assert_eq!(report.items[0].account, "alpha");
+        assert_eq!(report.items[0].total_size, 52);
+        assert_eq!(report.items[0].image_size, 10);
+        assert_eq!(report.items[0].gif_size, 7);
+        assert_eq!(report.items[0].video_size, 30);
+        assert_eq!(report.items[0].other_size, 5);
+        assert_eq!(
+            report.items[0]
+                .top_files
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "videos/clip.mp4",
+                "images/pic.jpg",
+                "images/anim.gif",
+                "other/readme.txt",
+            ]
+        );
+
+        assert_eq!(report.items[1].account, "beta");
+        assert_eq!(report.items[1].total_size, 12);
+        assert_eq!(report.items[1].image_size, 12);
+        assert_eq!(report.items[1].video_size, 0);
+        Ok(())
     }
 
     async fn create_thumbnail_test_service(

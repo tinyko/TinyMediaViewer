@@ -3,7 +3,7 @@ use deadpool_sqlite::{Config, Hook, HookError, Pool, Runtime};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{fs, path::Path};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Clone)]
 pub struct IndexStore {
@@ -426,6 +426,36 @@ impl IndexStore {
         .context("load all folder favorites task error")
     }
 
+    pub async fn save_viewer_preferences(&self, payload_json: String) -> Result<()> {
+        self.interact(move |conn| {
+            conn.execute(
+                "INSERT INTO viewer_preferences (id, payload_json, updated_at)
+                 VALUES (1, ?1, unixepoch('now') * 1000)
+                 ON CONFLICT(id) DO UPDATE SET
+                   payload_json = excluded.payload_json,
+                   updated_at = excluded.updated_at",
+                params![payload_json],
+            )?;
+            Ok(())
+        })
+        .await
+        .context("save viewer preferences task error")
+    }
+
+    pub async fn load_viewer_preferences(&self) -> Result<Option<String>> {
+        self.interact(move |conn| {
+            conn.query_row(
+                "SELECT payload_json FROM viewer_preferences WHERE id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+        .context("load viewer preferences task error")
+    }
+
     fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
@@ -480,6 +510,11 @@ impl IndexStore {
             );
             CREATE TABLE IF NOT EXISTS folder_favorite (
               path TEXT PRIMARY KEY,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS viewer_preferences (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              payload_json TEXT NOT NULL,
               updated_at INTEGER NOT NULL
             );
             ",
@@ -696,5 +731,43 @@ mod tests {
             .await
             .expect("load favorites after removal");
         assert_eq!(favorites, vec!["beta".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn persists_viewer_preferences_roundtrip() {
+        let temp = tempdir().expect("tempdir");
+        let store = IndexStore::new(temp.path()).await.expect("store");
+
+        store
+            .save_viewer_preferences(
+                serde_json::json!({
+                    "search": "beta",
+                    "sortMode": "favorite",
+                    "randomSeed": 7,
+                    "mediaSort": "random",
+                    "mediaRandomSeed": 11,
+                    "mediaFilter": "video",
+                    "categoryPath": "beta",
+                    "theme": "dark",
+                    "manualTheme": true,
+                    "effectsMode": "full",
+                    "effectsRenderer": "canvas2d",
+                })
+                .to_string(),
+            )
+            .await
+            .expect("save viewer preferences");
+
+        let payload = store
+            .load_viewer_preferences()
+            .await
+            .expect("load viewer preferences")
+            .expect("viewer preferences payload");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("parse viewer preferences payload");
+
+        assert_eq!(parsed["search"], "beta");
+        assert_eq!(parsed["sortMode"], "favorite");
+        assert_eq!(parsed["effectsRenderer"], "canvas2d");
     }
 }

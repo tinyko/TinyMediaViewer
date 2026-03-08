@@ -2,12 +2,13 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import "./App.css";
 import "./features/effects/effects.css";
-import type { MediaItem } from "./types";
+import type { MediaItem, ViewerMediaSortMode, ViewerPreferences } from "./types";
 import { postFolderFavorite } from "./api";
 import { MediaPreviewModal } from "./features/preview/MediaPreviewModal";
 import { useModalNavigation } from "./features/preview/useModalNavigation";
@@ -23,7 +24,10 @@ import {
 import { usePreviewBackfillQueue } from "./features/previews/usePreviewBackfillQueue";
 import { useCategoryMedia } from "./features/category/useCategoryMedia";
 import { useThemeAndPerf } from "./features/ui/useThemeAndPerf";
+import { useViewerPreferences } from "./features/ui/useViewerPreferences";
 import { useAppInteractions } from "./features/ui/useAppInteractions";
+import { SystemUsageModal } from "./features/systemUsage/SystemUsageModal";
+import { useSystemUsageReport } from "./features/systemUsage/useSystemUsageReport";
 import { Toolbar } from "./components/Toolbar";
 import { MainContent } from "./components/MainContent";
 
@@ -33,9 +37,31 @@ const HEART_PULSE_OFFSET_Y = 0;
 const APP_VERSION = import.meta.env.VITE_TMV_APP_VERSION ?? "0.1.0";
 const APP_SHORT_COMMIT = import.meta.env.VITE_TMV_SHORT_COMMIT ?? "dev";
 const APP_BUILD_TIME = import.meta.env.VITE_TMV_BUILD_TIME ?? "unknown";
-type MediaSortMode = "asc" | "desc" | "random";
+type MediaSortMode = ViewerMediaSortMode;
+const VIEWER_PREFERENCES_SAVE_DEBOUNCE_MS = 250;
+
+const areViewerPreferencesEqual = (
+  left: ViewerPreferences | null,
+  right: ViewerPreferences
+) =>
+  left !== null &&
+  left.search === right.search &&
+  left.sortMode === right.sortMode &&
+  left.randomSeed === right.randomSeed &&
+  left.mediaSort === right.mediaSort &&
+  left.mediaRandomSeed === right.mediaRandomSeed &&
+  left.mediaFilter === right.mediaFilter &&
+  left.categoryPath === right.categoryPath &&
+  left.theme === right.theme &&
+  left.manualTheme === right.manualTheme &&
+  left.effectsMode === right.effectsMode &&
+  left.effectsRenderer === right.effectsRenderer;
 
 function App() {
+  const viewerPreferencesQuery = useViewerPreferences();
+  const persistedViewerPreferences = viewerPreferencesQuery.data;
+  const persistViewerPreferences = viewerPreferencesQuery.persist;
+  const [viewerPreferencesHydrated, setViewerPreferencesHydrated] = useState(false);
   const [search, setSearch] = useState("");
   const [selected, setSelected] = useState<MediaItem | null>(null);
   const [mediaFilter, setMediaFilter] = useState<"image" | "video">("image");
@@ -45,12 +71,17 @@ function App() {
   const [mediaRandomSeed, setMediaRandomSeed] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
+  const [showSystemUsage, setShowSystemUsage] = useState(false);
 
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
   const authRedirectedRef = useRef(false);
+  const lastSavedViewerPreferencesRef = useRef<ViewerPreferences | null>(null);
+  const initialCategoryRestoreAttemptedRef = useRef(false);
   const deferredSearch = useDeferredValue(search);
 
-  const { store: rootStore, loading, error, loadRoot } = useRootFolder();
+  const { store: rootStore, loading, error, loadRoot } = useRootFolder({
+    enabled: viewerPreferencesHydrated,
+  });
   const rootVersion = useRootStoreSelector(rootStore, (state) => state.version);
   const filteredAccounts = useRootStoreSelector(
     rootStore,
@@ -76,14 +107,44 @@ function App() {
     categoryHasMore,
     categoryError,
     handleSelectCategory,
+    restoreCategory,
     refreshCategory,
     loadMoreCategory,
     resetCategory,
-  } = useCategoryMedia({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed });
+  } = useCategoryMedia({
+    rootVersion,
+    mediaFilter,
+    mediaSort,
+    mediaRandomSeed,
+  });
+  useEffect(() => {
+    if (viewerPreferencesHydrated) return;
+    if (persistedViewerPreferences) {
+      setSearch(persistedViewerPreferences.search);
+      setMediaFilter(persistedViewerPreferences.mediaFilter);
+      setSortMode(persistedViewerPreferences.sortMode);
+      setRandomSeed(persistedViewerPreferences.randomSeed);
+      setMediaSort(persistedViewerPreferences.mediaSort);
+      setMediaRandomSeed(persistedViewerPreferences.mediaRandomSeed);
+      restoreCategory(persistedViewerPreferences.categoryPath ?? null);
+      lastSavedViewerPreferencesRef.current = persistedViewerPreferences;
+      setViewerPreferencesHydrated(true);
+      return;
+    }
+    if (viewerPreferencesQuery.error) {
+      setViewerPreferencesHydrated(true);
+    }
+  }, [
+    restoreCategory,
+    persistedViewerPreferences,
+    viewerPreferencesHydrated,
+    viewerPreferencesQuery.error,
+  ]);
   const {
     theme,
     setTheme,
     setManualTheme,
+    manualTheme,
     effectsMode,
     cycleEffectsMode,
     effectsRenderer,
@@ -93,13 +154,21 @@ function App() {
     effectsEnabled,
     perfNotice,
     reportVisibleCards,
-  } = useThemeAndPerf();
+    preferencesHydrated: themePreferencesHydrated,
+  } = useThemeAndPerf({
+    initialPreferences: viewerPreferencesHydrated ? (persistedViewerPreferences ?? null) : null,
+    preferencesReady: viewerPreferencesHydrated,
+  });
+  const systemUsageQuery = useSystemUsageReport(showSystemUsage);
 
   const versionLabel = `v${APP_VERSION}`;
   const versionFingerprint = `${versionLabel}+${APP_SHORT_COMMIT} (${APP_BUILD_TIME})`;
   const selectedCategorySummary = useRootStoreSelector(rootStore, (state) =>
     selectCategorySummary(state, categoryPath)
   );
+  const preferredInitialCategoryPath = viewerPreferencesHydrated
+    ? (persistedViewerPreferences?.categoryPath ?? null)
+    : null;
   const selectedCounts = selectedCategorySummary?.countsReady ? selectedCategorySummary.counts : null;
   const totalMedia = selectedCounts
     ? selectedCounts.images + selectedCounts.gifs + selectedCounts.videos
@@ -193,6 +262,15 @@ function App() {
     const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`;
     window.location.assign(`/__tmv/login?returnTo=${encodeURIComponent(returnTo || "/")}`);
   }, []);
+  const onOpenSystemUsage = useCallback(() => {
+    setShowSystemUsage(true);
+  }, []);
+  const onCloseSystemUsage = useCallback(() => {
+    setShowSystemUsage(false);
+  }, []);
+  const onRefreshSystemUsage = useCallback(() => {
+    void systemUsageQuery.refetch();
+  }, [systemUsageQuery]);
   const onToggleTheme = useCallback(() => {
     setManualTheme(true);
     setTheme(theme === "light" ? "dark" : "light");
@@ -236,7 +314,104 @@ function App() {
     onSelect: setSelected,
   });
 
+  const currentViewerPreferences = useMemo<ViewerPreferences>(
+    () => ({
+      search,
+      sortMode,
+      randomSeed,
+      mediaSort,
+      mediaRandomSeed,
+      mediaFilter,
+      categoryPath: categoryPath ?? undefined,
+      theme,
+      manualTheme,
+      effectsMode,
+      effectsRenderer,
+    }),
+    [
+      categoryPath,
+      effectsMode,
+      effectsRenderer,
+      manualTheme,
+      mediaFilter,
+      mediaRandomSeed,
+      mediaSort,
+      randomSeed,
+      search,
+      sortMode,
+      theme,
+    ]
+  );
+
   useEffect(() => {
+    if (persistedViewerPreferences) {
+      lastSavedViewerPreferencesRef.current = persistedViewerPreferences;
+    }
+  }, [persistedViewerPreferences]);
+
+  useEffect(() => {
+    if (
+      !viewerPreferencesHydrated ||
+      !themePreferencesHydrated ||
+      !persistedViewerPreferences
+    ) {
+      return;
+    }
+    if (
+      areViewerPreferencesEqual(
+        lastSavedViewerPreferencesRef.current,
+        currentViewerPreferences
+      )
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      persistViewerPreferences(currentViewerPreferences);
+    }, VIEWER_PREFERENCES_SAVE_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [
+    currentViewerPreferences,
+    persistViewerPreferences,
+    persistedViewerPreferences,
+    themePreferencesHydrated,
+    viewerPreferencesHydrated,
+  ]);
+
+  useEffect(() => {
+    if (!viewerPreferencesHydrated || initialCategoryRestoreAttemptedRef.current) {
+      return;
+    }
+    if (!filteredAccounts.length) {
+      return;
+    }
+    initialCategoryRestoreAttemptedRef.current = true;
+    if (
+      preferredInitialCategoryPath &&
+      filteredAccounts.some((item) => item.path === preferredInitialCategoryPath)
+    ) {
+      if (categoryPath !== preferredInitialCategoryPath) {
+        void handleSelectCategory(preferredInitialCategoryPath);
+      }
+      return;
+    }
+    if (!categoryPath || !filteredAccounts.some((item) => item.path === categoryPath)) {
+      void handleSelectCategory(filteredAccounts[0].path);
+    }
+  }, [
+    categoryPath,
+    filteredAccounts,
+    handleSelectCategory,
+    preferredInitialCategoryPath,
+    viewerPreferencesHydrated,
+  ]);
+
+  useEffect(() => {
+    if (viewerPreferencesHydrated && !initialCategoryRestoreAttemptedRef.current) {
+      return;
+    }
+    if (rootVersion === 0) {
+      return;
+    }
     if (!filteredAccounts.length) {
       if (categoryPath) {
         resetCategory();
@@ -249,12 +424,25 @@ function App() {
     }
     if (filteredAccounts.some((item) => item.path === categoryPath)) return;
     void handleSelectCategory(filteredAccounts[0].path);
-  }, [categoryPath, filteredAccounts, handleSelectCategory, resetCategory]);
+  }, [
+    categoryPath,
+    filteredAccounts,
+    handleSelectCategory,
+    resetCategory,
+    rootVersion,
+    viewerPreferencesHydrated,
+  ]);
 
   const requiresAuth = error === "Unauthorized" || categoryError === "Unauthorized";
+  const preferenceError =
+    viewerPreferencesQuery.error instanceof Error
+      ? viewerPreferencesQuery.error.message
+      : viewerPreferencesQuery.persistError instanceof Error
+        ? viewerPreferencesQuery.persistError.message
+        : null;
   const toolbarError = requiresAuth
     ? "认证已失效，正在跳转登录..."
-    : error ?? favoriteError;
+    : error ?? favoriteError ?? preferenceError;
 
   useEffect(() => {
     if (!requiresAuth) {
@@ -329,6 +517,7 @@ function App() {
         onReauthenticate={onReauthenticate}
         refreshing={refreshing}
         onRefresh={onRefresh}
+        onOpenSystemUsage={onOpenSystemUsage}
         sortMode={sortMode}
         setSortMode={onSetSortMode}
         onRandomizeAccounts={onRandomizeAccounts}
@@ -372,6 +561,21 @@ function App() {
         onNext={onNext}
         hasPrev={hasPrev}
         hasNext={hasNext}
+      />
+
+      <SystemUsageModal
+        open={showSystemUsage}
+        report={systemUsageQuery.data ?? null}
+        loading={systemUsageQuery.isLoading || systemUsageQuery.isFetching}
+        error={
+          systemUsageQuery.error instanceof Error
+            ? systemUsageQuery.error.message
+            : systemUsageQuery.error
+              ? "系统占用统计失败"
+              : null
+        }
+        onClose={onCloseSystemUsage}
+        onRefresh={onRefreshSystemUsage}
       />
 
       {showScrollTop && (

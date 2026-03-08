@@ -29,6 +29,20 @@ export type FolderFavoriteInput = { path: string, favorite: boolean, };
 
 export type FolderFavoriteOutput = { path: string, favorite: boolean, };
 
+export type SystemUsageFile = { path: string, size: number, };
+
+export type SystemUsageAccount = { account: string, totalSize: number, imageSize: number, gifSize: number, videoSize: number, otherSize: number, topFiles: Array<SystemUsageFile>, };
+
+export type SystemUsageReport = { rootPath: string, generatedAt: number, items: Array<SystemUsageAccount>, };
+
+export type ViewerAccountSortMode = "time" | "name" | "favorite" | "random";
+
+export type ViewerMediaSortMode = "asc" | "desc" | "random";
+
+export type ViewerTheme = "light" | "dark";
+
+export type ViewerPreferences = { search: string, sortMode: ViewerAccountSortMode, randomSeed: number, mediaSort: ViewerMediaSortMode, mediaRandomSeed: number, mediaFilter: FolderMediaFilter, categoryPath?: string, theme: ViewerTheme, manualTheme: boolean, effectsMode: EffectsMode, effectsRenderer: EffectsRenderer, };
+
 export type PreviewDiagPhase = "enqueue" | "request" | "response" | "apply" | "error" | "timeout";
 
 export type PreviewDiagEvent = { ts: number, phase: PreviewDiagPhase, batchSize: number, paths: Array<string>, status?: number, err?: string, requestId?: string, };

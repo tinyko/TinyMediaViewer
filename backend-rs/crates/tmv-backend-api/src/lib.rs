@@ -22,7 +22,7 @@ use tmv_backend_core::{
     BackendService, FolderFavoriteInput, FolderFavoriteOutput, FolderIdentity, FolderMediaFilter,
     FolderMode, FolderPreview, FolderPreviewBatchOutput, FolderSnapshot, FolderSortOrder,
     FolderTotals, GetFolderOptions, MediaItem, MediaPage, PerfDiagEventsInput,
-    PreviewDiagEventsInput, ThumbnailError,
+    PreviewDiagEventsInput, SystemUsageReport, ThumbnailError, ViewerPreferences,
 };
 use tokio::{
     fs,
@@ -33,6 +33,8 @@ use url::Url;
 
 const BASIC_AUTH_REALM: &str = "TinyMediaViewer";
 const DEFAULT_ALLOWED_ORIGINS: &[&str] = &["http://localhost", "http://127.0.0.1", "http://[::1]"];
+const DEFAULT_SYSTEM_USAGE_LIMIT: usize = 10;
+const MAX_SYSTEM_USAGE_LIMIT: usize = 50;
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -96,6 +98,11 @@ pub fn build_api_router() -> Router<ApiState> {
         .route("/api/folder", get(get_folder))
         .route("/api/folder/favorite", post(set_folder_favorite))
         .route("/api/folder/previews", post(get_folder_previews))
+        .route(
+            "/api/viewer-preferences",
+            get(get_viewer_preferences).post(save_viewer_preferences),
+        )
+        .route("/api/system-usage", get(get_system_usage))
         .route("/media/{*path}", get(get_media))
         .route("/thumb/{*path}", get(get_thumbnail))
         .route("/__tmv/diag/preview", post(record_preview_events))
@@ -433,6 +440,49 @@ async fn set_folder_favorite(
             favorite: saved.favorite,
         })
         .into_response(),
+        Err(error) => json_error(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn get_system_usage(
+    State(state): State<ApiState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    let limit = match query.get("limit") {
+        Some(raw) if !raw.is_empty() => match raw.parse::<usize>() {
+            Ok(value) => value.clamp(1, MAX_SYSTEM_USAGE_LIMIT),
+            Err(_) => {
+                return json_error(StatusCode::BAD_REQUEST, "Unable to read system usage limit")
+            }
+        },
+        _ => DEFAULT_SYSTEM_USAGE_LIMIT,
+    };
+
+    match state.service.get_system_usage_report(limit).await {
+        Ok(report) => Json::<SystemUsageReport>(report).into_response(),
+        Err(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to scan system usage: {error}"),
+        ),
+    }
+}
+
+async fn get_viewer_preferences(State(state): State<ApiState>) -> Response {
+    match state.service.load_viewer_preferences().await {
+        Ok(preferences) => Json::<ViewerPreferences>(preferences).into_response(),
+        Err(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load viewer preferences: {error}"),
+        ),
+    }
+}
+
+async fn save_viewer_preferences(
+    State(state): State<ApiState>,
+    Json(input): Json<ViewerPreferences>,
+) -> Response {
+    match state.service.save_viewer_preferences(input).await {
+        Ok(saved) => Json::<ViewerPreferences>(saved).into_response(),
         Err(error) => json_error(StatusCode::BAD_REQUEST, error.to_string()),
     }
 }

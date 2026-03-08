@@ -17,6 +17,13 @@ export type {
   PreviewDiagEvent,
   PreviewDiagEventsInput,
   PreviewDiagPhase,
+  SystemUsageAccount,
+  SystemUsageFile,
+  SystemUsageReport,
+  ViewerAccountSortMode,
+  ViewerMediaSortMode,
+  ViewerPreferences,
+  ViewerTheme,
 } from "./generated/tmv-contract";
 
 export type PreviewDiagEventPhase = import("./generated/tmv-contract").PreviewDiagPhase;

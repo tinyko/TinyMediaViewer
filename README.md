@@ -16,6 +16,8 @@
 - 左侧账号列表支持 `按时间`、`按名称`、`按收藏` 和 `按随机`。`按收藏` 会筛出收藏账号；`按随机` 使用稳定 seed 打散顺序，只有再次点击按钮才会重新洗牌。
 - 账号行右侧支持收藏按钮，收藏状态通过 Rust backend 写入 SQLite 并持久化。
 - 右侧媒体网格支持 `按时间+`、`按时间-` 和 `按随机`。媒体随机顺序在前端基于当前已加载条目稳定重排，再次点击按钮才会换一组，不会为重洗牌重新拉接口。
+- Viewer 的本地偏好也通过 Rust backend 写入 SQLite：搜索词、账号排序、账号随机 seed、媒体筛选、媒体排序、媒体随机 seed、当前账号、主题、手动主题、特效模式和渲染器在刷新或重启后都会恢复。
+- 工具栏提供“系统占用情况”弹窗，按默认媒体根目录统计账号总占用、图片占用、视频占用、其它占用，并展示单个账号的 Top 5 大文件。
 - 前端特效层已经收口成共享 `EffectsStage`，默认请求 `webgpu`，初始化失败时自动回退到 `canvas2d`，工具栏显示 `WG×`。
 - 前后端契约由 Rust DTO 生成 TypeScript 文件，前端不再依赖旧的 `shared-types` 包。
 - 桌面端和开发态都只走 Rust backend，不再依赖旧的 Node/Fastify 服务链路。
@@ -26,13 +28,13 @@
 - `backend-rs/`
   Rust workspace，当前唯一后端主线。
   - `tmv-backend-app`: 可执行入口，提供 HTTP 服务和静态 viewer。
-  - `tmv-backend-api`: Axum 路由层，暴露 `/api/folder`、`/api/folder/previews`、`/api/folder/favorite`、`/__tmv/diag/*`、`/media/*`、`/thumb/*`。
-  - `tmv-backend-core`: 目录扫描、缓存、分页、排序、预览构建、LAN 鉴权、收藏状态叠加、缩略图调度。
-  - `tmv-backend-index`: SQLite 持久化，基于 `deadpool-sqlite` 保存索引、收藏、缩略图 job/asset 等本地状态。
+  - `tmv-backend-api`: Axum 路由层，暴露 `/api/folder`、`/api/folder/previews`、`/api/folder/favorite`、`/api/viewer-preferences`、`/api/system-usage`、`/__tmv/diag/*`、`/media/*`、`/thumb/*`。
+  - `tmv-backend-core`: 目录扫描、缓存、分页、排序、预览构建、LAN 鉴权、收藏状态叠加、viewer 偏好读写、系统占用统计、缩略图调度。
+  - `tmv-backend-index`: SQLite 持久化，基于 `deadpool-sqlite` 保存索引、收藏、viewer 偏好、缩略图 job/asset 等本地状态。
   - `tmv-backend-watch`: 文件系统 watch，目录变化时失效缓存。
   - `tmv-contract-export`: 从 Rust DTO 生成前端 TypeScript 契约。
 - `web/`
-  React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，分类媒体通过 React Query 分页缓存，账号和媒体列表都支持稳定随机重排，特效层支持真实 `canvas2d/webgpu` 双分支。
+  React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，分类媒体通过 React Query 分页缓存，账号和媒体列表都支持稳定随机重排，Viewer 偏好通过后端 SQLite 持久化，特效层支持真实 `canvas2d/webgpu` 双分支。
 - `desktop/`
   Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包，并在打包时把当前 `git rev-parse --short HEAD` 和 UTC 构建时间注入 viewer 指纹。
 - `archive/node-legacy/`
@@ -147,5 +149,5 @@ cargo check
 
 ## 相关说明
 - `desktop/README.md` 说明桌面壳层和 DMG 打包。
-- `web/README.md` 说明 viewer 开发命令、收藏筛选、账号/媒体随机排序、渲染器和契约生成。
+- `web/README.md` 说明 viewer 开发命令、SQLite 偏好持久化、系统占用弹窗、收藏筛选、账号/媒体随机排序、渲染器和契约生成。
 - 旧的 Node 代码已迁到 `archive/node-legacy/`，不要再把 `server/` 当成主线服务入口。

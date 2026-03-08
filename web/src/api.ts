@@ -6,6 +6,8 @@ import type {
   FolderPreviewBatchInput,
   FolderPreviewBatchOutput,
   PreviewDiagEventsInput,
+  SystemUsageReport,
+  ViewerPreferences,
 } from "./types";
 
 interface FetchFolderOptions {
@@ -98,6 +100,59 @@ export async function postFolderFavorite(
       typeof payload.error === "string"
         ? payload.error
         : `Failed to save favorite (${response.status})`;
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
+export async function fetchSystemUsage(limit = 10): Promise<SystemUsageReport> {
+  const response = await fetch(`/api/system-usage?limit=${encodeURIComponent(String(limit))}`);
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const message =
+      typeof payload.error === "string"
+        ? payload.error
+        : `Failed to load system usage (${response.status})`;
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
+export async function fetchViewerPreferences(): Promise<ViewerPreferences> {
+  const response = await fetch("/api/viewer-preferences");
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const message =
+      typeof payload.error === "string"
+        ? payload.error
+        : `Failed to load viewer preferences (${response.status})`;
+    throw new Error(message);
+  }
+
+  return response.json();
+}
+
+export async function postViewerPreferences(
+  input: ViewerPreferences
+): Promise<ViewerPreferences> {
+  const response = await fetch("/api/viewer-preferences", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const message =
+      typeof payload.error === "string"
+        ? payload.error
+        : `Failed to save viewer preferences (${response.status})`;
     throw new Error(message);
   }
 

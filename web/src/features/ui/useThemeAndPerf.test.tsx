@@ -1,6 +1,7 @@
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { createRef } from "react";
 import { postPerfDiagnostics } from "../../api";
+import type { ViewerPreferences } from "../../types";
 import { EffectsStage } from "../effects/EffectsStage";
 import { useThemeAndPerf } from "./useThemeAndPerf";
 
@@ -9,6 +10,23 @@ vi.mock("../../api", () => ({
 }));
 
 const mockedPostPerfDiagnostics = vi.mocked(postPerfDiagnostics);
+
+const makeViewerPreferences = (
+  overrides: Partial<ViewerPreferences> = {}
+): ViewerPreferences => ({
+  search: "",
+  sortMode: "time",
+  randomSeed: 0,
+  mediaSort: "desc",
+  mediaRandomSeed: 0,
+  mediaFilter: "image",
+  categoryPath: undefined,
+  theme: "light",
+  manualTheme: false,
+  effectsMode: "auto",
+  effectsRenderer: "webgpu",
+  ...overrides,
+});
 
 const make2dContext = () =>
   ({
@@ -34,7 +52,6 @@ describe("useThemeAndPerf", () => {
 
   beforeEach(() => {
     mockedPostPerfDiagnostics.mockResolvedValue();
-    window.localStorage.clear();
     vi.restoreAllMocks();
     Object.defineProperty(globalThis.navigator, "gpu", {
       configurable: true,
@@ -51,30 +68,48 @@ describe("useThemeAndPerf", () => {
     }
   });
 
-  it("migrates legacy renderer preferences to webgpu once", () => {
-    window.localStorage.setItem("mv-effects-renderer", "canvas2d");
+  it("hydrates theme and effects preferences from the backend payload", async () => {
+    const { result } = renderHook(() =>
+      useThemeAndPerf({
+        initialPreferences: makeViewerPreferences({
+          theme: "dark",
+          manualTheme: true,
+          effectsMode: "full",
+          effectsRenderer: "canvas2d",
+        }),
+        preferencesReady: true,
+      })
+    );
 
-    const { result } = renderHook(() => useThemeAndPerf());
-
-    expect(result.current.effectsRenderer).toBe("webgpu");
-    expect(window.localStorage.getItem("mv-effects-renderer")).toBe("webgpu");
-    expect(window.localStorage.getItem("mv-effects-renderer-migrated-v1")).toBe("true");
+    await waitFor(() => {
+      expect(result.current.preferencesHydrated).toBe(true);
+    });
+    expect(result.current.theme).toBe("dark");
+    expect(result.current.manualTheme).toBe(true);
+    expect(result.current.effectsMode).toBe("full");
+    expect(result.current.effectsRenderer).toBe("canvas2d");
   });
 
-  it("keeps a user-selected canvas2d preference after the migration already ran", () => {
-    const { result, unmount } = renderHook(() => useThemeAndPerf());
+  it("keeps a hydrated canvas2d preference until the user explicitly toggles it", async () => {
+    const { result } = renderHook(() =>
+      useThemeAndPerf({
+        initialPreferences: makeViewerPreferences({
+          effectsRenderer: "canvas2d",
+        }),
+        preferencesReady: true,
+      })
+    );
+
+    await waitFor(() => {
+      expect(result.current.preferencesHydrated).toBe(true);
+    });
+    expect(result.current.effectsRenderer).toBe("canvas2d");
 
     act(() => {
       result.current.toggleRenderer();
     });
 
-    expect(window.localStorage.getItem("mv-effects-renderer")).toBe("canvas2d");
-    expect(window.localStorage.getItem("mv-effects-renderer-migrated-v1")).toBe("true");
-
-    unmount();
-
-    const next = renderHook(() => useThemeAndPerf());
-    expect(next.result.current.effectsRenderer).toBe("canvas2d");
+    expect(result.current.effectsRenderer).toBe("webgpu");
   });
 
   it("shows WG× when webgpu was requested but the stage falls back to canvas2d", async () => {
@@ -101,7 +136,12 @@ describe("useThemeAndPerf", () => {
         effectsRenderer,
         resolvedRenderer,
         reportResolvedRenderer,
-      } = useThemeAndPerf();
+      } = useThemeAndPerf({
+        initialPreferences: makeViewerPreferences({
+          effectsRenderer: "webgpu",
+        }),
+        preferencesReady: true,
+      });
 
       return (
         <>
