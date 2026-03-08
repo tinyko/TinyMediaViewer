@@ -1,10 +1,12 @@
 import { memo, type RefObject } from "react";
-import type { CategoryPagePayload, FolderPreview, MediaItem } from "../types";
+import type { CategoryPagePayload, MediaItem } from "../types";
+import type { RootFolderStore } from "../features/root/rootStore";
 import { CategoryList } from "./CategoryList";
 import { MediaGrid } from "./MediaGrid";
 
 interface MainContentProps {
-  accounts: FolderPreview[];
+  accountPaths: string[];
+  rootStore: RootFolderStore;
   categoryPath: string | null;
   loading: boolean;
   onSelectCategory: (path: string) => void;
@@ -25,7 +27,8 @@ interface MainContentProps {
 }
 
 export const MainContent = memo(function MainContent({
-  accounts,
+  accountPaths,
+  rootStore,
   categoryPath,
   loading,
   onSelectCategory,
@@ -48,7 +51,8 @@ export const MainContent = memo(function MainContent({
     <section className="section">
       <div className="category-layout">
         <CategoryList
-          items={accounts}
+          paths={accountPaths}
+          rootStore={rootStore}
           selectedPath={categoryPath}
           loading={loading}
           onSelect={onSelectCategory}

@@ -261,6 +261,58 @@ describe("App root light mode + preview backfill", () => {
     });
   });
 
+  it("falls back to the first visible category when search excludes the restored category", async () => {
+    mockedFetchViewerPreferences.mockResolvedValue(
+      makeViewerPreferences({ categoryPath: "beta" })
+    );
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          name: "alpha",
+          path: "alpha",
+          modified: 100,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [],
+          countsReady: true,
+          previewReady: true,
+          favorite: false,
+        },
+        {
+          name: "beta",
+          path: "beta",
+          modified: 90,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [],
+          countsReady: true,
+          previewReady: true,
+          favorite: false,
+        },
+      ])
+    );
+    mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
+    mockedFetchCategoryPage.mockImplementation((path) =>
+      Promise.resolve(
+        makeCategoryPayloadWithMedia(path, [
+          path === "beta"
+            ? makeMedia("B_photo.jpg", "image")
+            : makeMedia("A_photo.jpg", "image"),
+        ])
+      )
+    );
+
+    renderWithQueryClient(<App />);
+
+    expect(await screen.findByText("B_photo.jpg")).toBeInTheDocument();
+
+    await userEvent.type(screen.getByRole("searchbox", { name: "筛选账号名称" }), "alp");
+
+    await waitFor(() => {
+      expect(screen.getByText("A_photo.jpg")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("B_photo.jpg")).not.toBeInTheDocument();
+    expect(document.querySelector('.category-item.active[data-path="alpha"]')).not.toBeNull();
+  });
+
   it("keeps items when countsReady=false and filters precisely after backfill", async () => {
     const previewDeferred = deferred<FolderPreviewBatchOutput>();
 

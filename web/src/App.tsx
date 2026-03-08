@@ -1,6 +1,6 @@
 import {
   useCallback,
-  useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -61,7 +61,8 @@ function App() {
     mediaSort,
     setMediaSort,
     refreshing,
-    filteredAccounts,
+    rootStore,
+    filteredAccountPaths,
     categoryPath,
     categoryPreview,
     categoryMedia,
@@ -118,6 +119,31 @@ function App() {
     setManualTheme(true);
     setTheme(theme === "light" ? "dark" : "light");
   }, [setManualTheme, setTheme, theme]);
+  const activeSelected = useMemo(() => {
+    if (!selected) return null;
+    if (!categoryPath) {
+      return null;
+    }
+    if (!categoryMedia.length) {
+      return categoryPreview ? selected : null;
+    }
+
+    const updated = categoryMedia.find((item) => item.path === selected.path);
+    if (!updated) {
+      return null;
+    }
+
+    if (
+      updated.modified !== selected.modified ||
+      updated.size !== selected.size ||
+      updated.url !== selected.url ||
+      updated.name !== selected.name
+    ) {
+      return updated;
+    }
+
+    return selected;
+  }, [categoryMedia, categoryPath, categoryPreview, selected]);
 
   const scrollTrackingKey = `${categoryPreview?.folder.path ?? "-"}|${mediaFilter}|${mediaSort}|${sortMode}`;
   const {
@@ -128,46 +154,17 @@ function App() {
     onHeartHueChange,
     scrollToTop,
   } = useAppInteractions({
-    selected,
+    selected: activeSelected,
     effectsEnabled,
     previewScrollRef,
     resetRootPreviewQueue,
     scrollTrackingKey,
   });
   const { onClose, onPrev, onNext, hasPrev, hasNext } = useModalNavigation({
-    selected,
+    selected: activeSelected,
     media: categoryMedia,
     onSelect: setSelected,
   });
-
-  useEffect(() => {
-    if (!selected) return;
-    if (!categoryPath) {
-      setSelected(null);
-      return;
-    }
-    if (!categoryMedia.length) {
-      if (!categoryPreview) {
-        setSelected(null);
-      }
-      return;
-    }
-
-    const updated = categoryMedia.find((item) => item.path === selected.path);
-    if (!updated) {
-      setSelected(null);
-      return;
-    }
-
-    if (
-      updated.modified !== selected.modified ||
-      updated.size !== selected.size ||
-      updated.url !== selected.url ||
-      updated.name !== selected.name
-    ) {
-      setSelected(updated);
-    }
-  }, [categoryMedia, categoryPath, categoryPreview, selected]);
 
   return (
     <div className="page">
@@ -223,7 +220,8 @@ function App() {
       />
 
       <MainContent
-        accounts={filteredAccounts}
+        accountPaths={filteredAccountPaths}
+        rootStore={rootStore}
         categoryPath={categoryPath}
         loading={loading}
         onSelectCategory={onSelectCategory}
@@ -244,7 +242,7 @@ function App() {
       />
 
       <MediaPreviewModal
-        media={selected}
+        media={activeSelected}
         onClose={onClose}
         onPrev={onPrev}
         onNext={onNext}

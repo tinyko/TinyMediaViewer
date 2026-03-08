@@ -3,7 +3,10 @@ import { fetchCategoryPage } from "../../api";
 import type { CategoryPagePayload } from "../../types";
 import { makePerfMediaItem } from "../../test/performanceFixtures";
 import { createQueryClientWrapper } from "../../test/queryClient";
-import { useCategoryMedia } from "./useCategoryMedia";
+import {
+  __categoryAggregateCacheForTests,
+  useCategoryMedia,
+} from "./useCategoryMedia";
 
 vi.mock("../../api", () => ({
   fetchCategoryPage: vi.fn(),
@@ -53,6 +56,7 @@ const makeCategoryPage = (
 describe("useCategoryMedia", () => {
   beforeEach(() => {
     mockedFetchCategoryPage.mockReset();
+    __categoryAggregateCacheForTests.clear();
   });
 
   it("requests sort-specific pages from the backend", async () => {
@@ -311,6 +315,8 @@ describe("useCategoryMedia", () => {
       expect(result.current.categoryHasMore).toBe(true);
     });
 
+    const firstPageItems = result.current.categoryMedia.slice();
+
     await act(async () => {
       await result.current.loadMoreCategory();
     });
@@ -324,6 +330,9 @@ describe("useCategoryMedia", () => {
       ]);
       expect(result.current.categoryHasMore).toBe(false);
     });
+    expect(result.current.categoryMedia[0]).toBe(firstPageItems[0]);
+    expect(result.current.categoryMedia[1]).toBe(firstPageItems[1]);
+    expect(result.current.categoryMedia[2]).toBe(firstPageItems[2]);
   });
 
   it("rerolls media locally in random mode without refetching backend pages", async () => {
@@ -407,5 +416,91 @@ describe("useCategoryMedia", () => {
           path === "alpha" && options?.kind === "image" && options?.sort === "desc"
       )
     ).toHaveLength(1);
+  });
+
+  it("evicts the least recently used aggregate cache entry after 24 query keys", async () => {
+    mockedFetchCategoryPage.mockImplementation((path) => {
+      if (path !== "alpha") {
+        throw new Error(`Unexpected path ${path}`);
+      }
+      return Promise.resolve(
+        makeCategoryPage("alpha", ["IMG_20260307_000001.jpg"])
+      );
+    });
+
+    const { result, rerender } = renderHook<ReturnType<typeof useCategoryMedia>, HookProps>(
+      ({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed }) =>
+        useCategoryMedia({ rootVersion, mediaFilter, mediaSort, mediaRandomSeed }),
+      {
+        wrapper: createQueryClientWrapper(),
+        initialProps: {
+          rootVersion: 1,
+          mediaFilter: "image",
+          mediaSort: "desc",
+          mediaRandomSeed: 0,
+        },
+      }
+    );
+
+    await act(async () => {
+      await result.current.handleSelectCategory("alpha");
+    });
+
+    for (let version = 1; version <= 25; version += 1) {
+      rerender({
+        rootVersion: version,
+        mediaFilter: "image",
+        mediaSort: "desc",
+        mediaRandomSeed: 0,
+      });
+      await waitFor(() => {
+        expect(result.current.categoryMedia.length).toBeGreaterThan(0);
+      });
+    }
+
+    expect(__categoryAggregateCacheForTests.size()).toBe(24);
+    expect(
+      __categoryAggregateCacheForTests.has(
+        JSON.stringify(["category", "alpha", "image", "desc", 1])
+      )
+    ).toBe(false);
+    expect(
+      __categoryAggregateCacheForTests.has(
+        JSON.stringify(["category", "alpha", "image", "desc", 25])
+      )
+    ).toBe(true);
+  });
+
+  it("clears aggregate entries when category queries are invalidated", async () => {
+    mockedFetchCategoryPage.mockResolvedValue(
+      makeCategoryPage("alpha", ["IMG_20260307_000001.jpg"])
+    );
+
+    const { result } = renderHook(
+      () =>
+        useCategoryMedia({
+          rootVersion: 1,
+          mediaFilter: "image",
+          mediaSort: "desc",
+          mediaRandomSeed: 0,
+        }),
+      {
+        wrapper: createQueryClientWrapper(),
+      }
+    );
+
+    await act(async () => {
+      await result.current.handleSelectCategory("alpha");
+    });
+
+    await waitFor(() => {
+      expect(__categoryAggregateCacheForTests.size()).toBe(1);
+    });
+
+    act(() => {
+      result.current.invalidateCategoryCache();
+    });
+
+    expect(__categoryAggregateCacheForTests.size()).toBe(0);
   });
 });

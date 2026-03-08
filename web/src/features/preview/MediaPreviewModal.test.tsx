@@ -112,4 +112,27 @@ describe("MediaPreviewModal", () => {
     expect(nextVideo).not.toBeNull();
     expect(nextVideo?.getAttribute("src")).toContain("/b.mp4?v=");
   });
+
+  it("closes from the top-right close button", () => {
+    const onClose = vi.fn();
+
+    render(
+      <MediaPreviewModal
+        media={mediaItem}
+        onClose={onClose}
+        onPrev={() => undefined}
+        onNext={() => undefined}
+        hasPrev={false}
+        hasNext={false}
+      />
+    );
+
+    const closeButton = document.querySelector(".close-button");
+    expect(closeButton).not.toBeNull();
+    if (!closeButton) return;
+
+    fireEvent.click(closeButton);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
 });

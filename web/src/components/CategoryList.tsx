@@ -1,31 +1,43 @@
-import { memo, useEffect, useMemo, useRef } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
-import type { FolderPreview } from "../types";
-
-const ROW_ESTIMATE = 76;
+import { memo, useRef } from "react";
+import {
+  selectFolderPreview,
+  type RootFolderStore,
+  useRootStoreSelector,
+} from "../features/root/rootStore";
+import { CategoryListVirtualViewport } from "./CategoryListVirtualViewport";
 
 interface CategoryListProps {
-  items: FolderPreview[];
+  paths: string[];
+  rootStore: RootFolderStore;
   selectedPath: string | null;
   loading: boolean;
   onSelect: (path: string) => void;
   onToggleFavorite: (path: string, favorite: boolean) => void;
   onVisiblePathsChange: (paths: string[]) => void;
+  onRowRender?: (path: string) => void;
 }
 
 interface CategoryRowProps {
-  item: FolderPreview;
+  path: string;
+  rootStore: RootFolderStore;
   selected: boolean;
   onSelect: (path: string) => void;
   onToggleFavorite: (path: string, favorite: boolean) => void;
+  onRowRender?: (path: string) => void;
 }
 
 const CategoryRow = memo(function CategoryRow({
-  item,
+  path,
+  rootStore,
   selected,
   onSelect,
   onToggleFavorite,
+  onRowRender,
 }: CategoryRowProps) {
+  const item = useRootStoreSelector(rootStore, (state) => selectFolderPreview(state, path));
+  if (!item) return null;
+  onRowRender?.(path);
+
   return (
     <div data-path={item.path} className={`category-item ${selected ? "active" : ""}`}>
       <button
@@ -61,88 +73,35 @@ const CategoryRow = memo(function CategoryRow({
 });
 
 export function CategoryList({
-  items,
+  paths,
+  rootStore,
   selectedPath,
   loading,
   onSelect,
   onToggleFavorite,
   onVisiblePathsChange,
+  onRowRender,
 }: CategoryListProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const lastVisiblePathsRef = useRef<string[]>([]);
-
-  const virtualizer = useVirtualizer({
-    count: items.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_ESTIMATE,
-    overscan: 6,
-    gap: 6,
-    initialRect: { width: 260, height: 640 },
-  });
-
-  const virtualItems = virtualizer.getVirtualItems();
-  const visiblePaths = useMemo(() => {
-    const source =
-      virtualItems.length > 0
-        ? virtualItems.map((row) => items[row.index]?.path)
-        : items.slice(0, 20).map((item) => item.path);
-    return source.filter((value): value is string => Boolean(value));
-  }, [items, virtualItems]);
-
-  useEffect(() => {
-    if (!visiblePaths.length) return;
-    const previous = lastVisiblePathsRef.current;
-    if (
-      previous.length === visiblePaths.length &&
-      previous.every((path, index) => path === visiblePaths[index])
-    ) {
-      return;
-    }
-    lastVisiblePathsRef.current = visiblePaths;
-    onVisiblePathsChange(visiblePaths);
-  }, [onVisiblePathsChange, visiblePaths]);
 
   return (
     <div className="category-list" ref={scrollRef}>
-      {items.length ? (
-        virtualItems.length > 0 ? (
-          <div
-            className="category-list__virtual"
-            style={{ height: `${virtualizer.getTotalSize()}px` }}
-          >
-            {virtualItems.map((row) => {
-              const item = items[row.index];
-              if (!item) return null;
-              return (
-                <div
-                  key={item.path}
-                  className="category-list__row"
-                  style={{ transform: `translateY(${row.start}px)` }}
-                >
-                  <CategoryRow
-                    item={item}
-                    selected={selectedPath === item.path}
-                    onSelect={onSelect}
-                    onToggleFavorite={onToggleFavorite}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          <div className="category-list__fallback">
-            {items.map((item) => (
-              <div key={item.path} className="category-list__fallback-row">
-                <CategoryRow
-                  item={item}
-                  selected={selectedPath === item.path}
-                  onSelect={onSelect}
-                  onToggleFavorite={onToggleFavorite}
-                />
-              </div>
-            ))}
-          </div>
-        )
+      {paths.length ? (
+        <CategoryListVirtualViewport
+          paths={paths}
+          scrollRef={scrollRef}
+          onVisiblePathsChange={onVisiblePathsChange}
+          renderRow={(path) => (
+            <CategoryRow
+              path={path}
+              rootStore={rootStore}
+              selected={selectedPath === path}
+              onSelect={onSelect}
+              onToggleFavorite={onToggleFavorite}
+              onRowRender={onRowRender}
+            />
+          )}
+        />
       ) : (
         !loading && <div className="empty">没有匹配的账号</div>
       )}

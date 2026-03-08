@@ -72,9 +72,9 @@ const sortPathsByRandomSeed = (paths: readonly string[], seed: number) =>
     .map((item) => item.path);
 
 const randomOrderCache = new WeakMap<readonly string[], Map<number, string[]>>();
-const filteredAccountsCache = new WeakMap<
+const filteredAccountPathsCache = new WeakMap<
   RootFolderStoreState,
-  Map<string, FolderPreview[]>
+  Map<string, string[]>
 >();
 
 const getRandomOrderForSeed = (paths: readonly string[], seed: number) => {
@@ -185,7 +185,7 @@ export const areStringArraysEqual = (
   return true;
 };
 
-export const selectFilteredAccounts = (
+export const selectFilteredAccountPaths = (
   state: RootFolderStoreState,
   options: {
     search: string;
@@ -195,10 +195,10 @@ export const selectFilteredAccounts = (
   }
 ) => {
   const cacheKey = buildFilteredAccountsCacheKey(options);
-  let stateCache = filteredAccountsCache.get(state);
+  let stateCache = filteredAccountPathsCache.get(state);
   if (!stateCache) {
     stateCache = new Map();
-    filteredAccountsCache.set(state, stateCache);
+    filteredAccountPathsCache.set(state, stateCache);
   }
   const cached = stateCache.get(cacheKey);
   if (cached) {
@@ -213,8 +213,8 @@ export const selectFilteredAccounts = (
         ? state.orderByFavorite
         : options.sortMode === "random"
           ? getRandomOrderForSeed(state.orderByModified, options.randomSeed ?? 0)
-        : state.orderByModified;
-  const accounts: FolderPreview[] = [];
+          : state.orderByModified;
+  const accountPaths: string[] = [];
   for (const path of order) {
     const indexedName = state.nameSearchIndex.get(path);
     if (search && (!indexedName || !indexedName.includes(search))) {
@@ -227,10 +227,41 @@ export const selectFilteredAccounts = (
     if (options.sortMode === "favorite" && !item.favorite) {
       continue;
     }
-    accounts.push(item);
+    accountPaths.push(item.path);
   }
-  stateCache.set(cacheKey, accounts);
-  return accounts;
+  stateCache.set(cacheKey, accountPaths);
+  return accountPaths;
+};
+
+export const selectFilteredAccounts = (
+  state: RootFolderStoreState,
+  options: {
+    search: string;
+    sortMode: RootAccountSortMode;
+    mediaFilter: RootMediaFilter;
+    randomSeed?: number;
+  }
+) =>
+  selectFilteredAccountPaths(state, options)
+    .map((path) => state.subfoldersByPath.get(path))
+    .filter((item): item is FolderPreview => Boolean(item));
+
+export const selectFolderPreview = (
+  state: RootFolderStoreState,
+  path: string
+) => state.subfoldersByPath.get(path) ?? null;
+
+export const selectFolderPreviewPathSet = (
+  state: RootFolderStoreState,
+  options: {
+    search: string;
+    sortMode: RootAccountSortMode;
+    mediaFilter: RootMediaFilter;
+    randomSeed?: number;
+  }
+) => {
+  const paths = selectFilteredAccountPaths(state, options);
+  return new Set(paths);
 };
 
 export const selectCategorySummary = (

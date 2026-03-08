@@ -1,16 +1,51 @@
 import {
   useCallback,
   useMemo,
-  useRef,
   useState,
   startTransition,
 } from "react";
 import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { fetchCategoryPage } from "../../api";
-import type { RootSummaryPayload, MediaItem } from "../../types";
-import { mergeMediaByPath, sortMediaByRandomSeed } from "./mediaUtils";
+import type { MediaItem } from "../../types";
+import { sortMediaByRandomSeed } from "./mediaUtils";
 
 const SERVER_PAGE_SIZE = 120;
+const CATEGORY_AGGREGATE_CACHE_LIMIT = 24;
+const categoryAggregateCache = new Map<
+  string,
+  {
+    pageSignatures: string[];
+    media: MediaItem[];
+    seenPaths: Set<string>;
+  }
+>();
+
+const touchCategoryAggregateCache = (
+  key: string,
+  entry: {
+    pageSignatures: string[];
+    media: MediaItem[];
+    seenPaths: Set<string>;
+  }
+) => {
+  categoryAggregateCache.delete(key);
+  categoryAggregateCache.set(key, entry);
+  while (categoryAggregateCache.size > CATEGORY_AGGREGATE_CACHE_LIMIT) {
+    const oldestKey = categoryAggregateCache.keys().next().value;
+    if (!oldestKey) break;
+    categoryAggregateCache.delete(oldestKey);
+  }
+};
+
+const clearCategoryAggregateCache = () => {
+  categoryAggregateCache.clear();
+};
+
+export const __categoryAggregateCacheForTests = {
+  clear: clearCategoryAggregateCache,
+  size: () => categoryAggregateCache.size,
+  has: (key: string) => categoryAggregateCache.has(key),
+};
 
 type CategoryMediaFilter = "image" | "video";
 type MediaSortMode = "asc" | "desc" | "random";
@@ -31,15 +66,6 @@ export function useCategoryMedia({
   const queryClient = useQueryClient();
   const [categoryPath, setCategoryPath] = useState<string | null>(null);
   const backendSort = mediaSort === "random" ? "desc" : mediaSort;
-  const aggregateRef = useRef<{
-    queryKey: string;
-    pageSignatures: string[];
-    media: MediaItem[];
-  }>({
-    queryKey: "",
-    pageSignatures: [],
-    media: [],
-  });
 
   const queryKey = useMemo(
     () => ["category", categoryPath, mediaFilter, backendSort, rootVersion],
@@ -75,11 +101,7 @@ export function useCategoryMedia({
 
   const categoryMediaBase = useMemo(() => {
     if (!data) {
-      aggregateRef.current = {
-        queryKey: queryKeyId,
-        pageSignatures: [],
-        media: [],
-      };
+      categoryAggregateCache.delete(queryKeyId);
       return [];
     }
 
@@ -88,43 +110,54 @@ export function useCategoryMedia({
       const lastPath = page.media.at(-1)?.path ?? "";
       return `${page.nextCursor ?? ""}\u0000${page.media.length}\u0000${firstPath}\u0000${lastPath}`;
     });
-    const previous = aggregateRef.current;
-    const sameQuery = previous.queryKey === queryKeyId;
+    const previous = categoryAggregateCache.get(queryKeyId);
+    const sameQuery = Boolean(previous);
     const prefixMatches =
       sameQuery &&
-      previous.pageSignatures.length <= pageSignatures.length &&
-      previous.pageSignatures.every((signature, index) => signature === pageSignatures[index]);
+      previous!.pageSignatures.length <= pageSignatures.length &&
+      previous!.pageSignatures.every((signature, index) => signature === pageSignatures[index]);
 
-    if (sameQuery && prefixMatches && previous.pageSignatures.length < pageSignatures.length) {
-      let appended = previous.media;
-      for (let index = previous.pageSignatures.length; index < data.pages.length; index += 1) {
-        appended = mergeMediaByPath(appended, data.pages[index].media);
+    if (sameQuery && prefixMatches && previous!.pageSignatures.length < pageSignatures.length) {
+      const appended = previous!.media.slice();
+      const seenPaths = previous!.seenPaths;
+      for (let index = previous!.pageSignatures.length; index < data.pages.length; index += 1) {
+        for (const item of data.pages[index].media) {
+          if (seenPaths.has(item.path)) continue;
+          seenPaths.add(item.path);
+          appended.push(item);
+        }
       }
-      aggregateRef.current = {
-        queryKey: queryKeyId,
+      touchCategoryAggregateCache(queryKeyId, {
         pageSignatures,
         media: appended,
-      };
+        seenPaths,
+      });
       return appended;
     }
 
     if (
       sameQuery &&
-      previous.pageSignatures.length === pageSignatures.length &&
-      previous.pageSignatures.every((signature, index) => signature === pageSignatures[index])
+      previous!.pageSignatures.length === pageSignatures.length &&
+      previous!.pageSignatures.every((signature, index) => signature === pageSignatures[index])
     ) {
-      return previous.media;
+      touchCategoryAggregateCache(queryKeyId, previous!);
+      return previous!.media;
     }
 
-    const rebuilt = data.pages.reduce<MediaItem[]>(
-      (merged, page) => mergeMediaByPath(merged, page.media),
-      []
-    );
-    aggregateRef.current = {
-      queryKey: queryKeyId,
+    const rebuilt: MediaItem[] = [];
+    const seenPaths = new Set<string>();
+    for (const page of data.pages) {
+      for (const item of page.media) {
+        if (seenPaths.has(item.path)) continue;
+        seenPaths.add(item.path);
+        rebuilt.push(item);
+      }
+    }
+    touchCategoryAggregateCache(queryKeyId, {
       pageSignatures,
       media: rebuilt,
-    };
+      seenPaths,
+    });
     return rebuilt;
   }, [data, queryKeyId]);
 
@@ -153,20 +186,17 @@ export function useCategoryMedia({
   }, []);
 
   const invalidateCategoryCache = useCallback(() => {
+    clearCategoryAggregateCache();
     void queryClient.invalidateQueries({ queryKey: ["category"] });
   }, [queryClient]);
 
   const refreshCategory = useCallback(
-    async (
-      nextRootFolder: RootSummaryPayload | null,
-      preferredPath: string | null
-    ): Promise<void> => {
+    async (candidatePaths: readonly string[], preferredPath: string | null): Promise<void> => {
       invalidateCategoryCache();
 
       const nextPath =
-        (preferredPath &&
-          nextRootFolder?.subfolders.find((item) => item.path === preferredPath)?.path) ??
-        nextRootFolder?.subfolders[0]?.path ??
+        (preferredPath && candidatePaths.includes(preferredPath) ? preferredPath : null) ??
+        candidatePaths[0] ??
         null;
 
       if (!nextPath) {
