@@ -3,7 +3,8 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
 import {
-  fetchFolder,
+  fetchCategoryPage,
+  fetchRootSummary,
   fetchFolderPreviews,
   fetchSystemUsage,
   fetchViewerPreferences,
@@ -13,16 +14,18 @@ import {
   postViewerPreferences,
 } from "./api";
 import type {
-  FolderPayload,
+  CategoryPagePayload,
   FolderPreviewBatchOutput,
   MediaItem,
+  RootSummaryPayload,
   SystemUsageReport,
   ViewerPreferences,
 } from "./types";
 import { renderWithQueryClient } from "./test/queryClient";
 
 vi.mock("./api", () => ({
-  fetchFolder: vi.fn(),
+  fetchCategoryPage: vi.fn(),
+  fetchRootSummary: vi.fn(),
   fetchFolderPreviews: vi.fn(),
   fetchSystemUsage: vi.fn(),
   fetchViewerPreferences: vi.fn(),
@@ -32,7 +35,8 @@ vi.mock("./api", () => ({
   postViewerPreferences: vi.fn(),
 }));
 
-const mockedFetchFolder = vi.mocked(fetchFolder);
+const mockedFetchCategoryPage = vi.mocked(fetchCategoryPage);
+const mockedFetchRootSummary = vi.mocked(fetchRootSummary);
 const mockedFetchFolderPreviews = vi.mocked(fetchFolderPreviews);
 const mockedFetchSystemUsage = vi.mocked(fetchSystemUsage);
 const mockedFetchViewerPreferences = vi.mocked(fetchViewerPreferences);
@@ -77,7 +81,7 @@ const makeMedia = (name: string, kind: MediaItem["kind"]): MediaItem => ({
   modified: Date.now(),
 });
 
-const makeLightRootPayload = (): FolderPayload => ({
+const makeLightRootPayload = (): RootSummaryPayload => ({
   folder: { name: "root", path: "" },
   breadcrumb: [{ name: "root", path: "" }],
   subfolders: [
@@ -104,35 +108,39 @@ const makeLightRootPayload = (): FolderPayload => ({
       approximate: true,
     },
   ],
-  media: [],
   totals: { media: 0, subfolders: 2 },
 });
 
 const makeRootPayloadWithSubfolders = (
-  subfolders: FolderPayload["subfolders"]
-): FolderPayload => ({
+  subfolders: RootSummaryPayload["subfolders"]
+): RootSummaryPayload => ({
   folder: { name: "root", path: "" },
   breadcrumb: [{ name: "root", path: "" }],
   subfolders,
-  media: [],
   totals: { media: 0, subfolders: subfolders.length },
 });
 
 const makeCategoryPayloadWithMedia = (
   path: string,
   media: MediaItem[]
-): FolderPayload => ({
+): CategoryPagePayload => ({
   folder: { name: path, path },
   breadcrumb: [
     { name: "root", path: "" },
     { name: path, path },
   ],
-  subfolders: [],
   media,
-  totals: { media: media.length, subfolders: 0 },
+  counts: {
+    images: media.filter((item) => item.kind === "image").length,
+    gifs: media.filter((item) => item.kind === "gif").length,
+    videos: media.filter((item) => item.kind === "video").length,
+    subfolders: 0,
+  },
+  totalMedia: media.length,
+  filteredTotal: media.length,
 });
 
-const makeCategoryPayload = (path: string): FolderPayload =>
+const makeCategoryPayload = (path: string): CategoryPagePayload =>
   makeCategoryPayloadWithMedia(path, [makeMedia("IMG_20260219_120000.jpg", "image")]);
 
 const readVisibleCategoryOrder = () =>
@@ -186,7 +194,8 @@ const makeSystemUsageReport = (): SystemUsageReport => ({
 
 describe("App root light mode + preview backfill", () => {
   beforeEach(() => {
-    mockedFetchFolder.mockReset();
+    mockedFetchCategoryPage.mockReset();
+    mockedFetchRootSummary.mockReset();
     mockedFetchFolderPreviews.mockReset();
     mockedFetchSystemUsage.mockReset();
     mockedFetchViewerPreferences.mockReset();
@@ -232,13 +241,10 @@ describe("App root light mode + preview backfill", () => {
       ],
     };
 
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        expect(options?.mode).toBe("light");
-        return Promise.resolve(makeLightRootPayload());
-      }
-      return Promise.resolve(makeCategoryPayload(targetPath));
-    });
+    mockedFetchRootSummary.mockResolvedValue(makeLightRootPayload());
+    mockedFetchCategoryPage.mockImplementation((targetPath) =>
+      Promise.resolve(makeCategoryPayload(targetPath))
+    );
     mockedFetchFolderPreviews.mockResolvedValue(previewOutput);
 
     renderWithQueryClient(<App />);
@@ -258,17 +264,14 @@ describe("App root light mode + preview backfill", () => {
   it("keeps items when countsReady=false and filters precisely after backfill", async () => {
     const previewDeferred = deferred<FolderPreviewBatchOutput>();
 
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        expect(options?.mode).toBe("light");
-        return Promise.resolve({
-          ...makeLightRootPayload(),
-          subfolders: [makeLightRootPayload().subfolders[0]],
-          totals: { media: 0, subfolders: 1 },
-        });
-      }
-      return Promise.resolve(makeCategoryPayload(targetPath));
+    mockedFetchRootSummary.mockResolvedValue({
+      ...makeLightRootPayload(),
+      subfolders: [makeLightRootPayload().subfolders[0]],
+      totals: { media: 0, subfolders: 1 },
     });
+    mockedFetchCategoryPage.mockImplementation((targetPath) =>
+      Promise.resolve(makeCategoryPayload(targetPath))
+    );
     mockedFetchFolderPreviews.mockReturnValue(previewDeferred.promise);
 
     renderWithQueryClient(<App />);
@@ -308,25 +311,24 @@ describe("App root light mode + preview backfill", () => {
       makeMedia(`IMG_${index.toString().padStart(4, "0")}.jpg`, "image")
     );
 
-    mockedFetchFolder.mockImplementation((targetPath = "") => {
-      if (targetPath === "") {
-        return Promise.resolve({
-          ...makeLightRootPayload(),
-          subfolders: [makeLightRootPayload().subfolders[0]],
-          totals: { media: 0, subfolders: 1 },
-        });
-      }
-      return Promise.resolve({
+    mockedFetchRootSummary.mockResolvedValue({
+      ...makeLightRootPayload(),
+      subfolders: [makeLightRootPayload().subfolders[0]],
+      totals: { media: 0, subfolders: 1 },
+    });
+    mockedFetchCategoryPage.mockImplementation((targetPath) =>
+      Promise.resolve({
         folder: { name: targetPath, path: targetPath },
         breadcrumb: [
           { name: "root", path: "" },
           { name: targetPath, path: targetPath },
         ],
-        subfolders: [],
         media: manyMedia,
-        totals: { media: manyMedia.length, subfolders: 0 },
-      });
-    });
+        counts: { images: manyMedia.length, gifs: 0, videos: 0, subfolders: 0 },
+        totalMedia: manyMedia.length,
+        filteredTotal: manyMedia.length,
+      })
+    );
     mockedFetchFolderPreviews.mockResolvedValue({
       items: [
         {
@@ -348,32 +350,31 @@ describe("App root light mode + preview backfill", () => {
   });
 
   it("uses selected folder typed counts as meter total", async () => {
-    mockedFetchFolder.mockImplementation((targetPath = "") => {
-      if (targetPath === "") {
-        return Promise.resolve({
-          ...makeLightRootPayload(),
-          subfolders: [
-            {
-              ...makeLightRootPayload().subfolders[0],
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 4112, gifs: 0, videos: 2, subfolders: 0 },
-            },
-          ],
-          totals: { media: 0, subfolders: 1 },
-        });
-      }
-      return Promise.resolve({
+    mockedFetchRootSummary.mockResolvedValue({
+      ...makeLightRootPayload(),
+      subfolders: [
+        {
+          ...makeLightRootPayload().subfolders[0],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 4112, gifs: 0, videos: 2, subfolders: 0 },
+        },
+      ],
+      totals: { media: 0, subfolders: 1 },
+    });
+    mockedFetchCategoryPage.mockImplementation((targetPath) =>
+      Promise.resolve({
         folder: { name: targetPath, path: targetPath },
         breadcrumb: [
           { name: "root", path: "" },
           { name: targetPath, path: targetPath },
         ],
-        subfolders: [],
         media: [makeMedia("A.jpg", "image"), makeMedia("B.mp4", "video")],
-        totals: { media: 4114, subfolders: 0 },
-      });
-    });
+        counts: { images: 4112, gifs: 0, videos: 2, subfolders: 0 },
+        totalMedia: 4114,
+        filteredTotal: 4112,
+      })
+    );
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
     renderWithQueryClient(<App />);
@@ -388,32 +389,29 @@ describe("App root light mode + preview backfill", () => {
   });
 
   it("filters account list by non-zero typed counts and reloads the visible account for the active media kind", async () => {
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        return Promise.resolve({
-          ...makeLightRootPayload(),
-          subfolders: [
-            {
-              ...makeLightRootPayload().subfolders[0],
-              name: "alpha",
-              path: "alpha",
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 2, gifs: 0, videos: 0, subfolders: 0 },
-            },
-            {
-              ...makeLightRootPayload().subfolders[1],
-              name: "beta",
-              path: "beta",
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 0, gifs: 0, videos: 3, subfolders: 0 },
-            },
-          ],
-          totals: { media: 0, subfolders: 2 },
-        });
-      }
-
+    mockedFetchRootSummary.mockResolvedValue({
+      ...makeLightRootPayload(),
+      subfolders: [
+        {
+          ...makeLightRootPayload().subfolders[0],
+          name: "alpha",
+          path: "alpha",
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 2, gifs: 0, videos: 0, subfolders: 0 },
+        },
+        {
+          ...makeLightRootPayload().subfolders[1],
+          name: "beta",
+          path: "beta",
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 0, gifs: 0, videos: 3, subfolders: 0 },
+        },
+      ],
+      totals: { media: 0, subfolders: 2 },
+    });
+    mockedFetchCategoryPage.mockImplementation((targetPath, options) => {
       if (targetPath === "beta" && options?.kind === "video") {
         return Promise.resolve(
           makeCategoryPayloadWithMedia(targetPath, [makeMedia("clip.mp4", "video")])
@@ -440,7 +438,7 @@ describe("App root light mode + preview backfill", () => {
     });
     expect(await screen.findByText("clip.mp4")).toBeInTheDocument();
     expect(
-      mockedFetchFolder.mock.calls.some(
+      mockedFetchCategoryPage.mock.calls.some(
         ([targetPath, options]) => targetPath === "beta" && options?.kind === "video"
       )
     ).toBe(true);
@@ -453,7 +451,7 @@ describe("App root light mode + preview backfill", () => {
     });
     expect(await screen.findByText("cover.jpg")).toBeInTheDocument();
     assert.equal(
-      mockedFetchFolder.mock.calls.filter(
+      mockedFetchCategoryPage.mock.calls.filter(
         ([targetPath, options]) => targetPath === "alpha" && options?.kind === "image"
       ).length,
       1
@@ -461,22 +459,19 @@ describe("App root light mode + preview backfill", () => {
   });
 
   it("requests filtered server pages when switching media kind", async () => {
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        return Promise.resolve({
-          ...makeLightRootPayload(),
-          subfolders: [
-            {
-              ...makeLightRootPayload().subfolders[0],
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 2, gifs: 0, videos: 1, subfolders: 0 },
-            },
-          ],
-          totals: { media: 0, subfolders: 1 },
-        });
-      }
-
+    mockedFetchRootSummary.mockResolvedValue({
+      ...makeLightRootPayload(),
+      subfolders: [
+        {
+          ...makeLightRootPayload().subfolders[0],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 2, gifs: 0, videos: 1, subfolders: 0 },
+        },
+      ],
+      totals: { media: 0, subfolders: 1 },
+    });
+    mockedFetchCategoryPage.mockImplementation((targetPath, options) => {
       if (options?.kind === "video") {
         return Promise.resolve({
           folder: { name: targetPath, path: targetPath },
@@ -484,9 +479,10 @@ describe("App root light mode + preview backfill", () => {
             { name: "root", path: "" },
             { name: targetPath, path: targetPath },
           ],
-          subfolders: [],
           media: [makeMedia("video_only.mp4", "video")],
-          totals: { media: 3, subfolders: 0 },
+          counts: { images: 2, gifs: 0, videos: 1, subfolders: 0 },
+          totalMedia: 3,
+          filteredTotal: 1,
         });
       }
 
@@ -496,9 +492,10 @@ describe("App root light mode + preview backfill", () => {
           { name: "root", path: "" },
           { name: targetPath, path: targetPath },
         ],
-        subfolders: [],
         media: [makeMedia("cover.jpg", "image"), makeMedia("detail.jpg", "image")],
-        totals: { media: 3, subfolders: 0 },
+        counts: { images: 2, gifs: 0, videos: 1, subfolders: 0 },
+        totalMedia: 3,
+        filteredTotal: 2,
       });
     });
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
@@ -510,12 +507,12 @@ describe("App root light mode + preview backfill", () => {
 
     expect(await screen.findByText("video_only.mp4")).toBeInTheDocument();
     expect(
-      mockedFetchFolder.mock.calls.some(
+      mockedFetchCategoryPage.mock.calls.some(
         ([targetPath, options]) => targetPath === "alpha" && options?.kind === "video"
       )
     ).toBe(true);
     expect(
-      mockedFetchFolder.mock.calls.some(
+      mockedFetchCategoryPage.mock.calls.some(
         ([targetPath, options]) => targetPath === "alpha" && options?.cursor === "page-2"
       )
     ).toBe(false);
@@ -527,26 +524,23 @@ describe("App root light mode + preview backfill", () => {
       path,
       favorite,
     }));
-    mockedFetchFolder.mockImplementation((targetPath = "") => {
-      if (targetPath === "") {
-        return Promise.resolve(
-          makeRootPayloadWithSubfolders([
-            {
-              ...makeLightRootPayload().subfolders[0],
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-            },
-            {
-              ...makeLightRootPayload().subfolders[1],
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-            },
-          ])
-        );
-      }
-
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          ...makeLightRootPayload().subfolders[0],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+        },
+        {
+          ...makeLightRootPayload().subfolders[1],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+        },
+      ])
+    );
+    mockedFetchCategoryPage.mockImplementation((targetPath) => {
       if (targetPath === "alpha") {
         return Promise.resolve(
           makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")])
@@ -583,26 +577,23 @@ describe("App root light mode + preview backfill", () => {
   });
 
   it("search switches to the matching account and clears the preview when no accounts match", async () => {
-    mockedFetchFolder.mockImplementation((targetPath = "") => {
-      if (targetPath === "") {
-        return Promise.resolve(
-          makeRootPayloadWithSubfolders([
-            {
-              ...makeLightRootPayload().subfolders[0],
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-            },
-            {
-              ...makeLightRootPayload().subfolders[1],
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-            },
-          ])
-        );
-      }
-
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          ...makeLightRootPayload().subfolders[0],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+        },
+        {
+          ...makeLightRootPayload().subfolders[1],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+        },
+      ])
+    );
+    mockedFetchCategoryPage.mockImplementation((targetPath) => {
       if (targetPath === "alpha") {
         return Promise.resolve(
           makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")])
@@ -642,60 +633,57 @@ describe("App root light mode + preview backfill", () => {
   });
 
   it("rerolls the account list each time random mode is clicked", async () => {
-    mockedFetchFolder.mockImplementation((targetPath = "") => {
-      if (targetPath === "") {
-        return Promise.resolve(
-          makeRootPayloadWithSubfolders([
-            {
-              name: "alpha",
-              path: "alpha",
-              modified: 400,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-              previews: [],
-              countsReady: true,
-              previewReady: true,
-              favorite: false,
-              approximate: false,
-            },
-            {
-              name: "beta",
-              path: "beta",
-              modified: 300,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-              previews: [],
-              countsReady: true,
-              previewReady: true,
-              favorite: false,
-              approximate: false,
-            },
-            {
-              name: "gamma",
-              path: "gamma",
-              modified: 200,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-              previews: [],
-              countsReady: true,
-              previewReady: true,
-              favorite: false,
-              approximate: false,
-            },
-            {
-              name: "delta",
-              path: "delta",
-              modified: 100,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-              previews: [],
-              countsReady: true,
-              previewReady: true,
-              favorite: false,
-              approximate: false,
-            },
-          ])
-        );
-      }
-
-      return Promise.resolve(makeCategoryPayload(targetPath));
-    });
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          name: "alpha",
+          path: "alpha",
+          modified: 400,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [],
+          countsReady: true,
+          previewReady: true,
+          favorite: false,
+          approximate: false,
+        },
+        {
+          name: "beta",
+          path: "beta",
+          modified: 300,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [],
+          countsReady: true,
+          previewReady: true,
+          favorite: false,
+          approximate: false,
+        },
+        {
+          name: "gamma",
+          path: "gamma",
+          modified: 200,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [],
+          countsReady: true,
+          previewReady: true,
+          favorite: false,
+          approximate: false,
+        },
+        {
+          name: "delta",
+          path: "delta",
+          modified: 100,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [],
+          countsReady: true,
+          previewReady: true,
+          favorite: false,
+          approximate: false,
+        },
+      ])
+    );
+    mockedFetchCategoryPage.mockImplementation((targetPath) =>
+      Promise.resolve(makeCategoryPayload(targetPath))
+    );
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
     renderWithQueryClient(<App />);
@@ -724,21 +712,18 @@ describe("App root light mode + preview backfill", () => {
   });
 
   it("rerolls the visible media cards each time media random mode is clicked", async () => {
-    mockedFetchFolder.mockImplementation((targetPath = "") => {
-      if (targetPath === "") {
-        return Promise.resolve(
-          makeRootPayloadWithSubfolders([
-            {
-              ...makeLightRootPayload().subfolders[0],
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 5, gifs: 0, videos: 0, subfolders: 0 },
-            },
-          ])
-        );
-      }
-
-      return Promise.resolve(
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          ...makeLightRootPayload().subfolders[0],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 5, gifs: 0, videos: 0, subfolders: 0 },
+        },
+      ])
+    );
+    mockedFetchCategoryPage.mockImplementation((targetPath) =>
+      Promise.resolve(
         makeCategoryPayloadWithMedia(targetPath, [
           makeMedia("IMG_20260307_000005.jpg", "image"),
           makeMedia("IMG_20260307_000004.jpg", "image"),
@@ -746,8 +731,8 @@ describe("App root light mode + preview backfill", () => {
           makeMedia("IMG_20260307_000002.jpg", "image"),
           makeMedia("IMG_20260307_000001.jpg", "image"),
         ])
-      );
-    });
+      )
+    );
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
     renderWithQueryClient(<App />);
@@ -793,13 +778,11 @@ describe("App root light mode + preview backfill", () => {
 
     let rootCalls = 0;
     let alphaCalls = 0;
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        expect(options?.mode).toBe("light");
-        rootCalls += 1;
-        return Promise.resolve(rootCalls === 1 ? initialRoot : refreshedRoot);
-      }
-
+    mockedFetchRootSummary.mockImplementation(() => {
+      rootCalls += 1;
+      return Promise.resolve(rootCalls === 1 ? initialRoot : refreshedRoot);
+    });
+    mockedFetchCategoryPage.mockImplementation((targetPath) => {
       alphaCalls += 1;
       return Promise.resolve(
         alphaCalls === 1
@@ -851,13 +834,11 @@ describe("App root light mode + preview backfill", () => {
     ]);
 
     let rootCalls = 0;
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        expect(options?.mode).toBe("light");
-        rootCalls += 1;
-        return Promise.resolve(rootCalls === 1 ? initialRoot : refreshedRoot);
-      }
-
+    mockedFetchRootSummary.mockImplementation(() => {
+      rootCalls += 1;
+      return Promise.resolve(rootCalls === 1 ? initialRoot : refreshedRoot);
+    });
+    mockedFetchCategoryPage.mockImplementation((targetPath) => {
       if (targetPath === "alpha") {
         return Promise.resolve(makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")]));
       }
@@ -883,20 +864,17 @@ describe("App root light mode + preview backfill", () => {
 
   it("closes the preview modal when the refreshed first page no longer contains the selected media", async () => {
     let alphaCalls = 0;
-    mockedFetchFolder.mockImplementation((targetPath = "") => {
-      if (targetPath === "") {
-        return Promise.resolve(
-          makeRootPayloadWithSubfolders([
-            {
-              ...makeLightRootPayload().subfolders[0],
-              countsReady: true,
-              previewReady: true,
-              counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
-            },
-          ])
-        );
-      }
-
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          ...makeLightRootPayload().subfolders[0],
+          countsReady: true,
+          previewReady: true,
+          counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+        },
+      ])
+    );
+    mockedFetchCategoryPage.mockImplementation((targetPath) => {
       alphaCalls += 1;
       return Promise.resolve(
         alphaCalls === 1
@@ -921,13 +899,10 @@ describe("App root light mode + preview backfill", () => {
   });
 
   it("opens the system usage modal and shows ranked account usage with top files", async () => {
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        expect(options?.mode).toBe("light");
-        return Promise.resolve(makeLightRootPayload());
-      }
-      return Promise.resolve(makeCategoryPayload(targetPath));
-    });
+    mockedFetchRootSummary.mockResolvedValue(makeLightRootPayload());
+    mockedFetchCategoryPage.mockImplementation((targetPath) =>
+      Promise.resolve(makeCategoryPayload(targetPath))
+    );
     mockedFetchFolderPreviews.mockResolvedValue({ items: [] });
 
     renderWithQueryClient(<App />);
@@ -938,7 +913,7 @@ describe("App root light mode + preview backfill", () => {
     expect(await screen.findByRole("dialog", { name: "系统占用情况" })).toBeInTheDocument();
     expect((await screen.findAllByText("KaiyoYagi")).length).toBeGreaterThan(0);
     expect((await screen.findAllByText("94.61 GiB")).length).toBeGreaterThan(0);
-    expect(mockedFetchSystemUsage).toHaveBeenCalledWith(10);
+    expect(mockedFetchSystemUsage).toHaveBeenCalledWith(10, { refresh: false });
     expect(
       screen.getByText("videos/KaiyoYagi_20240710_062707_1810923689787240480_01.mp4")
     ).toBeInTheDocument();
@@ -953,25 +928,21 @@ describe("App root light mode + preview backfill", () => {
     const firstPreviewDeferred = deferred<FolderPreviewBatchOutput>();
     const secondPreviewDeferred = deferred<FolderPreviewBatchOutput>();
 
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        expect(options?.mode).toBe("light");
-        return Promise.resolve(
-          makeRootPayloadWithSubfolders([
-            {
-              ...makeLightRootPayload().subfolders[0],
-              countsReady: false,
-              previewReady: false,
-              counts: { images: 0, gifs: 0, videos: 0, subfolders: 0 },
-              previews: [],
-              approximate: true,
-            },
-          ])
-        );
-      }
-
-      return Promise.resolve(makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")]));
-    });
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          ...makeLightRootPayload().subfolders[0],
+          countsReady: false,
+          previewReady: false,
+          counts: { images: 0, gifs: 0, videos: 0, subfolders: 0 },
+          previews: [],
+          approximate: true,
+        },
+      ])
+    );
+    mockedFetchCategoryPage.mockImplementation((targetPath) =>
+      Promise.resolve(makeCategoryPayloadWithMedia(targetPath, [makeMedia("A.jpg", "image")]))
+    );
 
     let previewCalls = 0;
     mockedFetchFolderPreviews.mockImplementation(() => {
@@ -1030,35 +1001,31 @@ describe("App root light mode + preview backfill", () => {
   });
 
   it("restores persisted viewer selections after remount instead of falling back to defaults", async () => {
-    mockedFetchFolder.mockImplementation((targetPath = "", options) => {
-      if (targetPath === "") {
-        expect(options?.mode).toBe("light");
-        return Promise.resolve(
-          makeRootPayloadWithSubfolders([
-            {
-              name: "alpha",
-              path: "alpha",
-              modified: 100,
-              counts: { images: 1, gifs: 0, videos: 1, subfolders: 0 },
-              previews: [],
-              countsReady: true,
-              previewReady: true,
-              favorite: false,
-            },
-            {
-              name: "beta",
-              path: "beta",
-              modified: 90,
-              counts: { images: 1, gifs: 0, videos: 1, subfolders: 0 },
-              previews: [],
-              countsReady: true,
-              previewReady: true,
-              favorite: false,
-            },
-          ])
-        );
-      }
-
+    mockedFetchRootSummary.mockResolvedValue(
+      makeRootPayloadWithSubfolders([
+        {
+          name: "alpha",
+          path: "alpha",
+          modified: 100,
+          counts: { images: 1, gifs: 0, videos: 1, subfolders: 0 },
+          previews: [],
+          countsReady: true,
+          previewReady: true,
+          favorite: false,
+        },
+        {
+          name: "beta",
+          path: "beta",
+          modified: 90,
+          counts: { images: 1, gifs: 0, videos: 1, subfolders: 0 },
+          previews: [],
+          countsReady: true,
+          previewReady: true,
+          favorite: false,
+        },
+      ])
+    );
+    mockedFetchCategoryPage.mockImplementation((targetPath, options) => {
       if (targetPath === "alpha") {
         return Promise.resolve(
           makeCategoryPayloadWithMedia(

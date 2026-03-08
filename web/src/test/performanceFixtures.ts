@@ -1,4 +1,9 @@
-import type { FolderPayload, FolderPreview, MediaItem } from "../types";
+import type {
+  CategoryPagePayload,
+  FolderPreview,
+  MediaItem,
+  RootSummaryPayload,
+} from "../types";
 
 const pad = (value: number, width = 4) => value.toString().padStart(width, "0");
 
@@ -35,11 +40,10 @@ export const makePerfFolderPreview = (index: number): FolderPreview => ({
   favorite: false,
 });
 
-export const makePerfRootPayload = (count = 1_000): FolderPayload => ({
+export const makePerfRootPayload = (count = 1_000): RootSummaryPayload => ({
   folder: { name: "root", path: "" },
   breadcrumb: [{ name: "root", path: "" }],
   subfolders: Array.from({ length: count }, (_, index) => makePerfFolderPreview(index + 1)),
-  media: [],
   totals: { media: 0, subfolders: count },
 });
 
@@ -47,13 +51,19 @@ export const makePerfCategoryPayload = (
   path: string,
   count = 5_000,
   kind: MediaItem["kind"] = "image"
-): FolderPayload => ({
+): CategoryPagePayload => ({
   folder: { name: path, path },
   breadcrumb: [
     { name: "root", path: "" },
     { name: path, path },
   ],
-  subfolders: [],
   media: Array.from({ length: count }, (_, index) => makePerfMediaItem(path, index + 1, kind)),
-  totals: { media: count, subfolders: 0 },
+  counts: {
+    images: kind === "video" ? 0 : count,
+    gifs: 0,
+    videos: kind === "video" ? count : 0,
+    subfolders: 0,
+  },
+  totalMedia: count,
+  filteredTotal: count,
 });

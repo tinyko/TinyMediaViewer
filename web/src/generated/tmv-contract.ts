@@ -13,9 +13,9 @@ export type FolderIdentity = { name: string, path: string, };
 
 export type FolderTotals = { media: number, subfolders: number, };
 
-export type FolderPayload = { folder: FolderIdentity, breadcrumb: Array<FolderIdentity>, subfolders: Array<FolderPreview>, media: Array<MediaItem>, totals: FolderTotals, nextCursor?: string, };
+export type RootSummaryPayload = { folder: FolderIdentity, breadcrumb: Array<FolderIdentity>, subfolders: Array<FolderPreview>, totals: FolderTotals, };
 
-export type FolderMode = "light" | "full";
+export type CategoryPagePayload = { folder: FolderIdentity, breadcrumb: Array<FolderIdentity>, media: Array<MediaItem>, counts: FolderCounts, totalMedia: number, filteredTotal: number, nextCursor?: string, };
 
 export type FolderMediaFilter = "image" | "video";
 

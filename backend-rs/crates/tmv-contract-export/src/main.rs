@@ -2,12 +2,13 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::{fs, path::PathBuf};
 use tmv_backend_core::{
-    EffectsMode, EffectsRenderer, FolderCounts, FolderFavoriteInput, FolderFavoriteOutput,
-    FolderIdentity, FolderMediaFilter, FolderMode, FolderPayload, FolderPreview,
+    CategoryPagePayload, EffectsMode, EffectsRenderer, FolderCounts, FolderFavoriteInput,
+    FolderFavoriteOutput, FolderIdentity, FolderMediaFilter, FolderPreview,
     FolderPreviewBatchError, FolderPreviewBatchInput, FolderPreviewBatchOutput, FolderTotals,
     MediaItem, MediaKind, PerfDiagEvent, PerfDiagEventsInput, PreviewDiagEvent,
-    PreviewDiagEventsInput, PreviewDiagPhase, SystemUsageAccount, SystemUsageFile,
-    SystemUsageReport, ViewerAccountSortMode, ViewerMediaSortMode, ViewerPreferences, ViewerTheme,
+    PreviewDiagEventsInput, PreviewDiagPhase, RootSummaryPayload, SystemUsageAccount,
+    SystemUsageFile, SystemUsageReport, ViewerAccountSortMode, ViewerMediaSortMode,
+    ViewerPreferences, ViewerTheme,
 };
 use ts_rs::TS;
 
@@ -68,8 +69,8 @@ fn render_contracts() -> String {
         export_decl::<FolderPreview>(),
         export_decl::<FolderIdentity>(),
         export_decl::<FolderTotals>(),
-        export_decl::<FolderPayload>(),
-        export_decl::<FolderMode>(),
+        export_decl::<RootSummaryPayload>(),
+        export_decl::<CategoryPagePayload>(),
         export_decl::<FolderMediaFilter>(),
         export_decl::<FolderPreviewBatchInput>(),
         export_decl::<FolderPreviewBatchError>(),

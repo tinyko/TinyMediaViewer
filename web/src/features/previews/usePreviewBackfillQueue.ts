@@ -4,11 +4,13 @@ import type { PreviewDiagEvent } from "../../types";
 import type { RootFolderStore } from "../root/rootStore";
 
 const ROOT_PREVIEW_BATCH_SIZE = 20;
-const ROOT_PREVIEW_MAX_CONCURRENCY = 4;
+const ROOT_PREVIEW_DEFAULT_CONCURRENCY = 2;
+const ROOT_PREVIEW_DEGRADED_CONCURRENCY = 1;
 const ROOT_PREVIEW_RETRY_LIMIT = 2;
 const ROOT_PREVIEW_TIMEOUT_MS = 12_000;
 const PREVIEW_DIAG_RING_LIMIT = 200;
 const PREVIEW_DIAG_FLUSH_MS = 300;
+const ROOT_PREVIEW_RECOVERY_STREAK = 5;
 
 const isAbortError = (error: unknown) =>
   error instanceof DOMException && error.name === "AbortError";
@@ -35,6 +37,8 @@ export function usePreviewBackfillQueue({
   const rootPreviewForceSingle = useRef(new Set<string>());
   const rootPreviewRetry = useRef(new Map<string, number>());
   const rootPreviewRunning = useRef(0);
+  const rootPreviewConcurrency = useRef(ROOT_PREVIEW_DEFAULT_CONCURRENCY);
+  const rootPreviewSuccessStreak = useRef(0);
   const rootPreviewControllers = useRef(new Set<AbortController>());
   const pumpRootPreviewQueueRef = useRef<() => void>(() => undefined);
   const previewDiagRing = useRef<PreviewDiagEvent[]>([]);
@@ -83,6 +87,8 @@ export function usePreviewBackfillQueue({
     rootPreviewForceSingle.current.clear();
     rootPreviewRetry.current.clear();
     rootPreviewRunning.current = 0;
+    rootPreviewConcurrency.current = ROOT_PREVIEW_DEFAULT_CONCURRENCY;
+    rootPreviewSuccessStreak.current = 0;
     for (const controller of rootPreviewControllers.current) {
       controller.abort();
     }
@@ -133,7 +139,7 @@ export function usePreviewBackfillQueue({
   const pumpRootPreviewQueue = useCallback(() => {
     const seq = rootPreviewSeq.current;
     while (
-      rootPreviewRunning.current < ROOT_PREVIEW_MAX_CONCURRENCY &&
+      rootPreviewRunning.current < rootPreviewConcurrency.current &&
       rootPreviewPending.current.length
     ) {
       const batch: string[] = [];
@@ -241,6 +247,8 @@ export function usePreviewBackfillQueue({
           }
 
           if (failed.size) {
+            rootPreviewConcurrency.current = ROOT_PREVIEW_DEGRADED_CONCURRENCY;
+            rootPreviewSuccessStreak.current = 0;
             pushPreviewDiagEvent({
               phase: "error",
               batchSize: failed.size,
@@ -253,6 +261,12 @@ export function usePreviewBackfillQueue({
               forceSingle: batch.length > 1,
               expectedVersion: rootVersion,
             });
+            return;
+          }
+
+          rootPreviewSuccessStreak.current += 1;
+          if (rootPreviewSuccessStreak.current >= ROOT_PREVIEW_RECOVERY_STREAK) {
+            rootPreviewConcurrency.current = ROOT_PREVIEW_DEFAULT_CONCURRENCY;
           }
         })
         .catch((error) => {
@@ -264,6 +278,8 @@ export function usePreviewBackfillQueue({
               : timedOut
                 ? "Preview request timeout"
                 : "Unknown preview error";
+          rootPreviewConcurrency.current = ROOT_PREVIEW_DEGRADED_CONCURRENCY;
+          rootPreviewSuccessStreak.current = 0;
           pushPreviewDiagEvent({
             phase: timedOut ? "timeout" : "error",
             batchSize: batch.length,

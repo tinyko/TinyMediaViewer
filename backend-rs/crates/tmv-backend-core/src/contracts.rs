@@ -73,12 +73,23 @@ pub struct FolderTotals {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
-pub struct FolderPayload {
+pub struct RootSummaryPayload {
     pub folder: FolderIdentity,
     pub breadcrumb: Vec<FolderIdentity>,
     pub subfolders: Vec<FolderPreview>,
-    pub media: Vec<MediaItem>,
     pub totals: FolderTotals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub struct CategoryPagePayload {
+    pub folder: FolderIdentity,
+    pub breadcrumb: Vec<FolderIdentity>,
+    pub media: Vec<MediaItem>,
+    pub counts: FolderCounts,
+    pub total_media: usize,
+    pub filtered_total: usize,
     #[ts(optional)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
@@ -228,14 +239,6 @@ impl Default for ViewerPreferences {
             effects_renderer: EffectsRenderer::Webgpu,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
-#[serde(rename_all = "lowercase")]
-#[ts(rename_all = "lowercase")]
-pub enum FolderMode {
-    Light,
-    Full,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]

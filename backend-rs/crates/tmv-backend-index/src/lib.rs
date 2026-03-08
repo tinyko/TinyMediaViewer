@@ -3,7 +3,7 @@ use deadpool_sqlite::{Config, Hook, HookError, Pool, Runtime};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::{fs, path::Path};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 #[derive(Clone)]
 pub struct IndexStore {
@@ -14,7 +14,10 @@ pub struct IndexStore {
 pub struct PersistedMediaRecord {
     pub ordinal: i64,
     pub media_path: String,
+    pub filter_group: String,
+    pub name: String,
     pub kind: String,
+    pub sort_ts_ms: i64,
     pub modified: f64,
     pub size: i64,
     pub payload_json: String,
@@ -25,6 +28,10 @@ pub struct PersistedManifestRecord {
     pub path: String,
     pub stamp: String,
     pub root_modified: f64,
+    pub media_total: i64,
+    pub image_total: i64,
+    pub gif_total: i64,
+    pub video_total: i64,
     pub subfolders_json: String,
     pub watched_dirs_json: String,
     pub media_json: String,
@@ -37,6 +44,10 @@ pub struct SaveManifestInput {
     pub path: String,
     pub stamp: String,
     pub root_modified: f64,
+    pub media_total: i64,
+    pub image_total: i64,
+    pub gif_total: i64,
+    pub video_total: i64,
     pub subfolders_json: String,
     pub watched_dirs_json: String,
     pub media_json: String,
@@ -102,11 +113,15 @@ impl IndexStore {
         self.interact(move |conn| {
             let tx = conn.transaction()?;
             tx.execute(
-                "INSERT INTO folder_manifest (path, stamp, root_modified, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, unixepoch('now') * 1000)
+                "INSERT INTO folder_manifest (path, stamp, root_modified, media_total, image_total, gif_total, video_total, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, unixepoch('now') * 1000)
                  ON CONFLICT(path) DO UPDATE SET
                    stamp = excluded.stamp,
                    root_modified = excluded.root_modified,
+                   media_total = excluded.media_total,
+                   image_total = excluded.image_total,
+                   gif_total = excluded.gif_total,
+                   video_total = excluded.video_total,
                    subfolders_json = excluded.subfolders_json,
                    watched_dirs_json = excluded.watched_dirs_json,
                    media_json = excluded.media_json,
@@ -117,6 +132,10 @@ impl IndexStore {
                     manifest.path,
                     manifest.stamp,
                     manifest.root_modified,
+                    manifest.media_total,
+                    manifest.image_total,
+                    manifest.gif_total,
+                    manifest.video_total,
                     manifest.subfolders_json,
                     manifest.watched_dirs_json,
                     manifest.media_json,
@@ -130,15 +149,18 @@ impl IndexStore {
             )?;
             {
                 let mut stmt = tx.prepare(
-                    "INSERT INTO media_entry (folder_path, ordinal, media_path, kind, modified, size, payload_json)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO media_entry (folder_path, ordinal, media_path, filter_group, name, kind, sort_ts_ms, modified, size, payload_json)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 )?;
                 for item in manifest.media {
                     stmt.execute(params![
                         manifest.path,
                         item.ordinal,
                         item.media_path,
+                        item.filter_group,
+                        item.name,
                         item.kind,
+                        item.sort_ts_ms,
                         item.modified,
                         item.size,
                         item.payload_json
@@ -175,7 +197,7 @@ impl IndexStore {
         self.interact(move |conn| {
             let row = if let Some(stamp_value) = stamp {
                 conn.query_row(
-                    "SELECT path, stamp, root_modified, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json
+                    "SELECT path, stamp, root_modified, media_total, image_total, gif_total, video_total, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json
                      FROM folder_manifest WHERE path = ?1 AND stamp = ?2",
                     params![path, stamp_value],
                     |row| {
@@ -183,18 +205,22 @@ impl IndexStore {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, f64>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, String>(5)?,
-                            row.get::<_, Option<Vec<u8>>>(6)?,
-                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, String>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, Option<Vec<u8>>>(10)?,
+                            row.get::<_, Option<String>>(11)?,
                         ))
                     },
                 )
                 .optional()?
             } else {
                 conn.query_row(
-                    "SELECT path, stamp, root_modified, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json
+                    "SELECT path, stamp, root_modified, media_total, image_total, gif_total, video_total, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json
                      FROM folder_manifest WHERE path = ?1",
                     params![path],
                     |row| {
@@ -202,18 +228,21 @@ impl IndexStore {
                             row.get::<_, String>(0)?,
                             row.get::<_, String>(1)?,
                             row.get::<_, f64>(2)?,
-                            row.get::<_, String>(3)?,
-                            row.get::<_, String>(4)?,
-                            row.get::<_, String>(5)?,
-                            row.get::<_, Option<Vec<u8>>>(6)?,
-                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, i64>(5)?,
+                            row.get::<_, i64>(6)?,
+                            row.get::<_, String>(7)?,
+                            row.get::<_, String>(8)?,
+                            row.get::<_, String>(9)?,
+                            row.get::<_, Option<Vec<u8>>>(10)?,
+                            row.get::<_, Option<String>>(11)?,
                         ))
                     },
                 )
                 .optional()?
             };
-
-            let Some((path, stamp, root_modified, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json)) = row else {
+            let Some((path, stamp, root_modified, media_total, image_total, gif_total, video_total, subfolders_json, watched_dirs_json, media_json, media_bin, default_page_media_json)) = row else {
                 return Ok(None);
             };
 
@@ -221,6 +250,10 @@ impl IndexStore {
                 path,
                 stamp,
                 root_modified,
+                media_total,
+                image_total,
+                gif_total,
+                video_total,
                 subfolders_json,
                 watched_dirs_json,
                 media_json,
@@ -230,6 +263,90 @@ impl IndexStore {
         })
         .await
         .context("load manifest inner task error")
+    }
+
+    pub async fn has_media_entries(&self, folder_path: String) -> Result<bool> {
+        self.interact(move |conn| {
+            conn.query_row(
+                "SELECT 1 FROM media_entry WHERE folder_path = ?1 LIMIT 1",
+                params![folder_path],
+                |_row| Ok(true),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(false))
+            .map_err(Into::into)
+        })
+        .await
+        .context("has media entries task error")
+    }
+
+    pub async fn load_media_page_payloads(
+        &self,
+        folder_path: String,
+        filter_group: Option<String>,
+        descending: bool,
+        offset: i64,
+        limit: i64,
+    ) -> Result<Vec<String>> {
+        self.interact(move |conn| {
+            let order = if descending { "DESC" } else { "ASC" };
+            let sql = if filter_group.is_some() {
+                format!(
+                    "SELECT payload_json FROM media_entry
+                     WHERE folder_path = ?1 AND filter_group = ?2
+                     ORDER BY sort_ts_ms {order}, name ASC, media_path ASC
+                     LIMIT ?3 OFFSET ?4"
+                )
+            } else {
+                format!(
+                    "SELECT payload_json FROM media_entry
+                     WHERE folder_path = ?1
+                     ORDER BY sort_ts_ms {order}, name ASC, media_path ASC
+                     LIMIT ?2 OFFSET ?3"
+                )
+            };
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = if let Some(filter_group) = filter_group {
+                stmt.query_map(params![folder_path, filter_group, limit, offset], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            } else {
+                stmt.query_map(params![folder_path, limit, offset], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            Ok(rows)
+        })
+        .await
+        .context("load media page payloads task error")
+    }
+
+    pub async fn count_media_entries(
+        &self,
+        folder_path: String,
+        filter_group: Option<String>,
+    ) -> Result<i64> {
+        self.interact(move |conn| {
+            if let Some(filter_group) = filter_group {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM media_entry WHERE folder_path = ?1 AND filter_group = ?2",
+                    params![folder_path, filter_group],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(Into::into)
+            } else {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM media_entry WHERE folder_path = ?1",
+                    params![folder_path],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(Into::into)
+            }
+        })
+        .await
+        .context("count media entries task error")
     }
 
     pub async fn save_preview(
@@ -463,6 +580,10 @@ impl IndexStore {
               path TEXT PRIMARY KEY,
               stamp TEXT NOT NULL,
               root_modified INTEGER NOT NULL,
+              media_total INTEGER NOT NULL DEFAULT 0,
+              image_total INTEGER NOT NULL DEFAULT 0,
+              gif_total INTEGER NOT NULL DEFAULT 0,
+              video_total INTEGER NOT NULL DEFAULT 0,
               subfolders_json TEXT NOT NULL,
               watched_dirs_json TEXT NOT NULL,
               media_json TEXT NOT NULL DEFAULT '[]',
@@ -474,14 +595,15 @@ impl IndexStore {
               folder_path TEXT NOT NULL,
               ordinal INTEGER NOT NULL,
               media_path TEXT NOT NULL,
+              filter_group TEXT NOT NULL DEFAULT 'image',
+              name TEXT NOT NULL DEFAULT '',
               kind TEXT NOT NULL,
+              sort_ts_ms INTEGER NOT NULL DEFAULT 0,
               modified INTEGER NOT NULL,
               size INTEGER NOT NULL,
               payload_json TEXT NOT NULL,
               PRIMARY KEY (folder_path, ordinal)
             );
-            CREATE INDEX IF NOT EXISTS idx_media_entry_folder_path
-              ON media_entry (folder_path);
             CREATE TABLE IF NOT EXISTS folder_preview_cache (
               path TEXT NOT NULL,
               preview_limit INTEGER NOT NULL,
@@ -522,6 +644,11 @@ impl IndexStore {
         ensure_manifest_media_json_column(conn)?;
         ensure_manifest_media_bin_column(conn)?;
         ensure_manifest_default_page_media_json_column(conn)?;
+        ensure_manifest_counts_columns(conn)?;
+        ensure_media_entry_filter_group_column(conn)?;
+        ensure_media_entry_name_column(conn)?;
+        ensure_media_entry_sort_ts_ms_column(conn)?;
+        ensure_media_entry_indexes(conn)?;
         conn.execute(
             "INSERT INTO runtime_meta (key, value, updated_at)
              VALUES ('schema_version', ?1, unixepoch('now') * 1000)
@@ -592,9 +719,101 @@ fn ensure_manifest_default_page_media_json_column(conn: &Connection) -> Result<(
     Ok(())
 }
 
+fn ensure_manifest_counts_columns(conn: &Connection) -> Result<()> {
+    for (column, default_value) in [
+        ("media_total", "0"),
+        ("image_total", "0"),
+        ("gif_total", "0"),
+        ("video_total", "0"),
+    ] {
+        let mut stmt = conn.prepare("PRAGMA table_info(folder_manifest)")?;
+        let columns = stmt
+            .query_map([], |row| row.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if columns.iter().any(|existing| existing == column) {
+            continue;
+        }
+
+        conn.execute(
+            &format!(
+                "ALTER TABLE folder_manifest ADD COLUMN {column} INTEGER NOT NULL DEFAULT {default_value}"
+            ),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_media_entry_filter_group_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(media_entry)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if columns.iter().any(|column| column == "filter_group") {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE media_entry ADD COLUMN filter_group TEXT NOT NULL DEFAULT 'image'",
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_media_entry_name_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(media_entry)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if columns.iter().any(|column| column == "name") {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE media_entry ADD COLUMN name TEXT NOT NULL DEFAULT ''",
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_media_entry_sort_ts_ms_column(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(media_entry)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if columns.iter().any(|column| column == "sort_ts_ms") {
+        return Ok(());
+    }
+
+    conn.execute(
+        "ALTER TABLE media_entry ADD COLUMN sort_ts_ms INTEGER NOT NULL DEFAULT 0",
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_media_entry_indexes(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_entry_folder_path ON media_entry (folder_path)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_entry_folder_group_sort
+         ON media_entry (folder_path, filter_group, sort_ts_ms, name, media_path)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_media_entry_folder_sort
+         ON media_entry (folder_path, sort_ts_ms, name, media_path)",
+        [],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{IndexStore, PersistedMediaRecord, SaveManifestInput};
+    use rusqlite::Connection;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -641,13 +860,20 @@ mod tests {
                 root_modified: 123.0,
                 subfolders_json: "[]".to_string(),
                 watched_dirs_json: "[]".to_string(),
+                media_total: 1,
+                image_total: 1,
+                gif_total: 0,
+                video_total: 0,
                 media_json: "[{\"path\":\"alpha/image.jpg\"}]".to_string(),
                 media_bin: vec![1, 2, 3],
                 default_page_media_json: "[{\"path\":\"alpha/image.jpg\"}]".to_string(),
                 media: vec![PersistedMediaRecord {
                     ordinal: 0,
                     media_path: "alpha/image.jpg".to_string(),
+                    filter_group: "image".to_string(),
+                    name: "image.jpg".to_string(),
                     kind: "image".to_string(),
+                    sort_ts_ms: 123_000,
                     modified: 123.0,
                     size: 456,
                     payload_json: "{\"path\":\"alpha/image.jpg\"}".to_string(),
@@ -689,6 +915,71 @@ mod tests {
             .await
             .expect("load preview");
         assert!(preview.is_some());
+    }
+
+    #[tokio::test]
+    async fn migrates_v3_schema_to_v4_columns() {
+        let temp = tempdir().expect("tempdir");
+        let db_path = temp.path().join("tmv-index.sqlite3");
+        let conn = Connection::open(&db_path).expect("open sqlite");
+        conn.execute_batch(
+            "
+            CREATE TABLE folder_manifest (
+              path TEXT PRIMARY KEY,
+              stamp TEXT NOT NULL,
+              root_modified INTEGER NOT NULL,
+              subfolders_json TEXT NOT NULL,
+              watched_dirs_json TEXT NOT NULL,
+              media_json TEXT NOT NULL DEFAULT '[]',
+              media_bin BLOB,
+              default_page_media_json TEXT,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE media_entry (
+              folder_path TEXT NOT NULL,
+              ordinal INTEGER NOT NULL,
+              media_path TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              modified INTEGER NOT NULL,
+              size INTEGER NOT NULL,
+              payload_json TEXT NOT NULL,
+              PRIMARY KEY (folder_path, ordinal)
+            );
+            CREATE TABLE runtime_meta (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            INSERT INTO runtime_meta (key, value, updated_at)
+            VALUES ('schema_version', '3', 0);
+            ",
+        )
+        .expect("seed v3 schema");
+        drop(conn);
+
+        let store = IndexStore::new(temp.path()).await.expect("migrate store");
+        let columns = store
+            .interact(|conn| {
+                let mut manifest_stmt = conn.prepare("PRAGMA table_info(folder_manifest)")?;
+                let manifest_columns = manifest_stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut media_stmt = conn.prepare("PRAGMA table_info(media_entry)")?;
+                let media_columns = media_stmt
+                    .query_map([], |row| row.get::<_, String>(1))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok((manifest_columns, media_columns))
+            })
+            .await
+            .expect("load migrated columns");
+
+        assert!(columns.0.contains(&"media_total".to_string()));
+        assert!(columns.0.contains(&"image_total".to_string()));
+        assert!(columns.0.contains(&"gif_total".to_string()));
+        assert!(columns.0.contains(&"video_total".to_string()));
+        assert!(columns.1.contains(&"filter_group".to_string()));
+        assert!(columns.1.contains(&"name".to_string()));
+        assert!(columns.1.contains(&"sort_ts_ms".to_string()));
     }
 
     #[tokio::test]

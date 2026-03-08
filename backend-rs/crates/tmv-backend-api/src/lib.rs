@@ -12,17 +12,16 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
-    borrow::Cow,
     collections::HashMap,
     net::{IpAddr, SocketAddr},
     path::{Path as FsPath, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tmv_backend_core::{
-    BackendService, FolderFavoriteInput, FolderFavoriteOutput, FolderIdentity, FolderMediaFilter,
-    FolderMode, FolderPreview, FolderPreviewBatchOutput, FolderSnapshot, FolderSortOrder,
-    FolderTotals, GetFolderOptions, MediaItem, MediaPage, PerfDiagEventsInput,
-    PreviewDiagEventsInput, SystemUsageReport, ThumbnailError, ViewerPreferences,
+    BackendService, CategoryPagePayload, FolderFavoriteInput, FolderFavoriteOutput,
+    FolderMediaFilter, FolderPreviewBatchOutput, FolderSortOrder, GetCategoryOptions,
+    PerfDiagEventsInput, PreviewDiagEventsInput, RootSummaryPayload, SystemUsageReport,
+    ThumbnailError, ViewerPreferences,
 };
 use tokio::{
     fs,
@@ -77,25 +76,14 @@ struct LoginFormInput {
     return_to: Option<String>,
 }
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FolderPayloadView<'a> {
-    folder: &'a FolderIdentity,
-    breadcrumb: &'a [FolderIdentity],
-    subfolders: &'a [FolderPreview],
-    media: Cow<'a, [MediaItem]>,
-    totals: &'a FolderTotals,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next_cursor: Option<String>,
-}
-
 pub fn build_api_router() -> Router<ApiState> {
     Router::new()
         .route("/health", get(health))
         .route("/__tmv/login", get(show_login).post(submit_login))
         .route("/__tmv/auth", get(trigger_auth))
         .route("/__tmv/auth-complete", get(auth_complete))
-        .route("/api/folder", get(get_folder))
+        .route("/api/root", get(get_root))
+        .route("/api/category", get(get_category))
         .route("/api/folder/favorite", post(set_folder_favorite))
         .route("/api/folder/previews", post(get_folder_previews))
         .route(
@@ -241,144 +229,56 @@ async fn submit_login(
         .unwrap_or_else(|_| Redirect::to("/").into_response())
 }
 
-async fn get_folder(
+async fn get_root(State(state): State<ApiState>) -> Response {
+    match state.service.get_root_summary().await {
+        Ok(payload) => Json::<RootSummaryPayload>(payload).into_response(),
+        Err(error) => json_error(StatusCode::BAD_REQUEST, error.to_string()),
+    }
+}
+
+async fn get_category(
     State(state): State<ApiState>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     let target_path = query.get("path").map(String::as_str).unwrap_or("");
+    if target_path.trim().is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "Category path is required");
+    }
+
     let limit = match query.get("limit") {
         Some(raw) if !raw.is_empty() => match raw.parse::<usize>() {
             Ok(value) => Some(value),
-            Err(_) => return json_error(StatusCode::BAD_REQUEST, "Unable to read folder"),
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "Unable to read category limit"),
         },
         _ => None,
     };
 
-    let mode = match parse_mode(
-        query.get("mode").map(String::as_str),
-        target_path,
-        state.enable_light_root_mode,
-    ) {
-        Ok(mode) => mode,
-        Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
-    };
     let media_filter = match parse_media_filter(query.get("kind").map(String::as_str)) {
-        Ok(filter) => filter,
+        Ok(Some(filter)) => filter,
+        Ok(None) => FolderMediaFilter::Image,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
     };
     let sort_order = match parse_sort_order(query.get("sort").map(String::as_str)) {
         Ok(order) => order,
         Err(error) => return json_error(StatusCode::BAD_REQUEST, error.to_string()),
     };
-    let default_limit = state.service.default_folder_page_limit();
-    let requested_limit = limit.unwrap_or(default_limit);
-    let wants_preencoded_default_page = mode == FolderMode::Full
-        && media_filter.is_none()
-        && sort_order == FolderSortOrder::Desc
-        && query.get("cursor").is_none_or(|value| value.is_empty())
-        && requested_limit == default_limit;
 
     match state
         .service
-        .get_folder_page(
+        .get_category_page(
             target_path,
-            GetFolderOptions {
+            GetCategoryOptions {
                 cursor: query.get("cursor").cloned(),
                 limit,
-                mode,
                 media_filter,
                 sort_order,
             },
         )
         .await
     {
-        Ok(page) => {
-            if wants_preencoded_default_page
-                && matches!(&page.media_page, MediaPage::BorrowedRange { start: 0, .. })
-                && page.snapshot.default_page_media_json.is_some()
-            {
-                if let Ok(response) = build_preencoded_folder_response(
-                    &page.snapshot,
-                    page.snapshot
-                        .default_page_media_json
-                        .as_deref()
-                        .unwrap_or("[]"),
-                    page.next_cursor.clone(),
-                ) {
-                    return response;
-                }
-            }
-
-            Json(build_folder_payload_view(
-                &page.snapshot,
-                page.media_page.as_cow(&page.snapshot.media),
-                page.next_cursor,
-            ))
-            .into_response()
-        }
+        Ok(payload) => Json::<CategoryPagePayload>(payload).into_response(),
         Err(error) => json_error(StatusCode::BAD_REQUEST, error.to_string()),
     }
-}
-
-fn build_folder_payload_view<'a>(
-    snapshot: &'a FolderSnapshot,
-    media: Cow<'a, [MediaItem]>,
-    next_cursor: Option<String>,
-) -> FolderPayloadView<'a> {
-    FolderPayloadView {
-        folder: &snapshot.folder,
-        breadcrumb: &snapshot.breadcrumb,
-        subfolders: &snapshot.subfolders,
-        media,
-        totals: &snapshot.totals,
-        next_cursor,
-    }
-}
-
-fn build_preencoded_folder_response(
-    snapshot: &FolderSnapshot,
-    media_json: &str,
-    next_cursor: Option<String>,
-) -> Result<Response> {
-    let folder_json = serde_json::to_string(&snapshot.folder)?;
-    let breadcrumb_json = serde_json::to_string(&snapshot.breadcrumb)?;
-    let subfolders_json = serde_json::to_string(&snapshot.subfolders)?;
-    let totals_json = serde_json::to_string(&snapshot.totals)?;
-
-    let mut body = String::with_capacity(
-        folder_json.len()
-            + breadcrumb_json.len()
-            + subfolders_json.len()
-            + totals_json.len()
-            + media_json.len()
-            + next_cursor.as_ref().map_or(0, String::len)
-            + 96,
-    );
-    body.push_str("{\"folder\":");
-    body.push_str(&folder_json);
-    body.push_str(",\"breadcrumb\":");
-    body.push_str(&breadcrumb_json);
-    body.push_str(",\"subfolders\":");
-    body.push_str(&subfolders_json);
-    body.push_str(",\"media\":");
-    body.push_str(media_json);
-    body.push_str(",\"totals\":");
-    body.push_str(&totals_json);
-    if let Some(cursor) = next_cursor {
-        body.push_str(",\"nextCursor\":");
-        body.push_str(&serde_json::to_string(&cursor)?);
-    }
-    body.push('}');
-
-    Ok((
-        StatusCode::OK,
-        [(
-            header::CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        )],
-        Body::from(body),
-    )
-        .into_response())
 }
 
 async fn get_folder_previews(State(state): State<ApiState>, Json(input): Json<Value>) -> Response {
@@ -457,8 +357,15 @@ async fn get_system_usage(
         },
         _ => DEFAULT_SYSTEM_USAGE_LIMIT,
     };
+    let bypass_cache = query
+        .get("refresh")
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "yes"));
 
-    match state.service.get_system_usage_report(limit).await {
+    match state
+        .service
+        .get_system_usage_report(limit, bypass_cache)
+        .await
+    {
         Ok(report) => Json::<SystemUsageReport>(report).into_response(),
         Err(error) => json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -598,25 +505,6 @@ async fn record_perf_events(
     match state.service.record_perf_events(input.events).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
-    }
-}
-
-fn parse_mode(
-    input: Option<&str>,
-    target_path: &str,
-    enable_light_root_mode: bool,
-) -> Result<FolderMode> {
-    match input {
-        None | Some("") => {
-            if enable_light_root_mode && target_path.trim().is_empty() {
-                Ok(FolderMode::Light)
-            } else {
-                Ok(FolderMode::Full)
-            }
-        }
-        Some("light") => Ok(FolderMode::Light),
-        Some("full") => Ok(FolderMode::Full),
-        Some(_) => Err(anyhow!("mode must be light or full")),
     }
 }
 
@@ -1060,10 +948,8 @@ pub fn normalize_legacy_origins(origins: &[String]) -> Vec<String> {
 mod tests {
     use super::{
         build_session_cookie, has_valid_session_cookie, is_origin_allowed, login_path,
-        map_thumbnail_generation_error, parse_byte_range, parse_mode, sanitize_return_to,
-        validate_basic_auth,
+        map_thumbnail_generation_error, parse_byte_range, sanitize_return_to, validate_basic_auth,
     };
-    use crate::FolderMode;
     use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use tmv_backend_core::ThumbnailError;
@@ -1076,18 +962,6 @@ mod tests {
             HeaderValue::from_str(&format!("Basic {payload}")).expect("valid authorization header"),
         );
         headers
-    }
-
-    #[test]
-    fn parses_root_mode_like_node() {
-        assert!(matches!(
-            parse_mode(None, "", true).expect("root light mode"),
-            FolderMode::Light
-        ));
-        assert!(matches!(
-            parse_mode(None, "alpha", true).expect("nested full mode"),
-            FolderMode::Full
-        ));
     }
 
     #[test]

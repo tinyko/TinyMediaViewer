@@ -1,10 +1,10 @@
 import { useMemo, useRef, useSyncExternalStore } from "react";
-import type { FolderPayload, FolderPreview } from "../../types";
+import type { FolderPreview, RootSummaryPayload } from "../../types";
 
 export type RootAccountSortMode = "time" | "name" | "favorite" | "random";
 export type RootMediaFilter = "image" | "video";
 
-type RootFolderMeta = Pick<FolderPayload, "folder" | "breadcrumb" | "totals">;
+type RootFolderMeta = Pick<RootSummaryPayload, "folder" | "breadcrumb" | "totals">;
 
 export interface RootFolderStoreState {
   folderMeta: RootFolderMeta | null;
@@ -71,8 +71,44 @@ const sortPathsByRandomSeed = (paths: readonly string[], seed: number) =>
     )
     .map((item) => item.path);
 
+const randomOrderCache = new WeakMap<readonly string[], Map<number, string[]>>();
+const filteredAccountsCache = new WeakMap<
+  RootFolderStoreState,
+  Map<string, FolderPreview[]>
+>();
+
+const getRandomOrderForSeed = (paths: readonly string[], seed: number) => {
+  let cache = randomOrderCache.get(paths);
+  if (!cache) {
+    cache = new Map();
+    randomOrderCache.set(paths, cache);
+  }
+
+  const cached = cache.get(seed);
+  if (cached) {
+    return cached;
+  }
+
+  const generated = sortPathsByRandomSeed(paths, seed);
+  cache.set(seed, generated);
+  return generated;
+};
+
+const buildFilteredAccountsCacheKey = (options: {
+  search: string;
+  sortMode: RootAccountSortMode;
+  mediaFilter: RootMediaFilter;
+  randomSeed?: number;
+}) =>
+  [
+    options.sortMode,
+    options.mediaFilter,
+    options.randomSeed ?? 0,
+    options.search.trim().toLowerCase(),
+  ].join("\u0000");
+
 const buildStateFromPayload = (
-  payload: FolderPayload,
+  payload: RootSummaryPayload,
   version: number
 ): RootFolderStoreState => {
   const subfoldersByPath = new Map(payload.subfolders.map((item) => [item.path, item]));
@@ -158,6 +194,17 @@ export const selectFilteredAccounts = (
     randomSeed?: number;
   }
 ) => {
+  const cacheKey = buildFilteredAccountsCacheKey(options);
+  let stateCache = filteredAccountsCache.get(state);
+  if (!stateCache) {
+    stateCache = new Map();
+    filteredAccountsCache.set(state, stateCache);
+  }
+  const cached = stateCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
   const search = options.search.trim().toLowerCase();
   const order =
     options.sortMode === "name"
@@ -165,7 +212,7 @@ export const selectFilteredAccounts = (
       : options.sortMode === "favorite"
         ? state.orderByFavorite
         : options.sortMode === "random"
-          ? sortPathsByRandomSeed(state.orderByModified, options.randomSeed ?? 0)
+          ? getRandomOrderForSeed(state.orderByModified, options.randomSeed ?? 0)
         : state.orderByModified;
   const accounts: FolderPreview[] = [];
   for (const path of order) {
@@ -182,6 +229,7 @@ export const selectFilteredAccounts = (
     }
     accounts.push(item);
   }
+  stateCache.set(cacheKey, accounts);
   return accounts;
 };
 
@@ -211,7 +259,7 @@ export class RootFolderStore {
     return this.state.subfoldersByPath.get(path)?.countsReady ?? false;
   }
 
-  replaceRoot(payload: FolderPayload) {
+  replaceRoot(payload: RootSummaryPayload) {
     this.state = buildStateFromPayload(payload, this.state.version + 1);
     this.emit();
   }

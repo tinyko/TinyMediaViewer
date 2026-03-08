@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { FolderPreview } from "../types";
 
-const ROW_ESTIMATE = 86;
+const ROW_ESTIMATE = 76;
 
 interface CategoryListProps {
   items: FolderPreview[];
@@ -28,36 +28,34 @@ const CategoryRow = memo(function CategoryRow({
 }: CategoryRowProps) {
   return (
     <div data-path={item.path} className={`category-item ${selected ? "active" : ""}`}>
-      <div className="category-item__title-row">
-        <button
-          type="button"
-          className="category-item__body"
-          onClick={() => onSelect(item.path)}
-        >
-          <div className="category-item__title">{item.name}</div>
-          <div className="category-item__meta">
-            {!item.countsReady ? (
-              <span>统计中...</span>
-            ) : !item.previewReady ? (
-              <span>统计失败</span>
-            ) : (
-              <>
-                <span>🖼️ {item.counts.images + item.counts.gifs}</span>
-                <span>🎞️ {item.counts.videos}</span>
-              </>
-            )}
-          </div>
-        </button>
-        <button
-          type="button"
-          className={`category-item__favorite ${item.favorite ? "active" : ""}`}
-          aria-label={item.favorite ? `取消收藏 ${item.name}` : `收藏 ${item.name}`}
-          aria-pressed={item.favorite}
-          onClick={() => onToggleFavorite(item.path, !item.favorite)}
-        >
-          {item.favorite ? "♥" : "♡"}
-        </button>
-      </div>
+      <button
+        type="button"
+        className="category-item__body"
+        onClick={() => onSelect(item.path)}
+      >
+        <div className="category-item__title">{item.name}</div>
+        <div className="category-item__meta">
+          {!item.countsReady ? (
+            <span>统计中...</span>
+          ) : !item.previewReady ? (
+            <span>统计失败</span>
+          ) : (
+            <>
+              <span className="category-item__metric">🖼️ {item.counts.images + item.counts.gifs}</span>
+              <span className="category-item__metric">🎞️ {item.counts.videos}</span>
+            </>
+          )}
+        </div>
+      </button>
+      <button
+        type="button"
+        className={`category-item__favorite ${item.favorite ? "active" : ""}`}
+        aria-label={item.favorite ? `取消收藏 ${item.name}` : `收藏 ${item.name}`}
+        aria-pressed={item.favorite}
+        onClick={() => onToggleFavorite(item.path, !item.favorite)}
+      >
+        {item.favorite ? "♥" : "♡"}
+      </button>
     </div>
   );
 });
@@ -78,7 +76,7 @@ export function CategoryList({
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ROW_ESTIMATE,
     overscan: 6,
-    gap: 8,
+    gap: 6,
     initialRect: { width: 260, height: 640 },
   });
 

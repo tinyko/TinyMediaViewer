@@ -1,9 +1,8 @@
 export type {
+  CategoryPagePayload,
   EffectsMode,
   EffectsRenderer,
   FolderMediaFilter,
-  FolderMode,
-  FolderPayload,
   FolderFavoriteInput,
   FolderFavoriteOutput,
   FolderPreview,
@@ -17,6 +16,7 @@ export type {
   PreviewDiagEvent,
   PreviewDiagEventsInput,
   PreviewDiagPhase,
+  RootSummaryPayload,
   SystemUsageAccount,
   SystemUsageFile,
   SystemUsageReport,

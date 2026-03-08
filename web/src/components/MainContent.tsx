@@ -1,5 +1,5 @@
 import { memo, type RefObject } from "react";
-import type { FolderPayload, FolderPreview, MediaItem } from "../types";
+import type { CategoryPagePayload, FolderPreview, MediaItem } from "../types";
 import { CategoryList } from "./CategoryList";
 import { MediaGrid } from "./MediaGrid";
 
@@ -13,7 +13,7 @@ interface MainContentProps {
   previewScrollRef: RefObject<HTMLDivElement | null>;
   categoryLoading: boolean;
   categoryError: string | null;
-  categoryPreview: FolderPayload | null;
+  categoryPreview: CategoryPagePayload | null;
   visibleCategoryMedia: MediaItem[];
   filteredCategoryMediaCount: number;
   categoryHasMore: boolean;

@@ -89,4 +89,27 @@ describe("CategoryList", () => {
     expect(onToggleFavorite).toHaveBeenCalledWith("alpha", true);
     expect(onSelect).not.toHaveBeenCalled();
   });
+
+  it("selects the account from the full row button", () => {
+    const onSelect = vi.fn();
+
+    render(
+      <CategoryList
+        items={items}
+        selectedPath={null}
+        loading={false}
+        onSelect={onSelect}
+        onToggleFavorite={() => undefined}
+        onVisiblePathsChange={() => undefined}
+      />
+    );
+
+    const rowButton = screen.getByText("alpha").closest("button");
+    expect(rowButton).not.toBeNull();
+    if (!rowButton) return;
+
+    fireEvent.click(rowButton);
+
+    expect(onSelect).toHaveBeenCalledWith("alpha");
+  });
 });

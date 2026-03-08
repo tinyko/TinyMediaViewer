@@ -4,7 +4,6 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::{
-    borrow::Cow,
     collections::{HashMap, HashSet},
     fs::Metadata,
     path::{Component, Path, PathBuf},
@@ -25,12 +24,13 @@ mod contracts;
 mod thumbnail;
 
 pub use contracts::{
-    EffectsMode, EffectsRenderer, FolderCounts, FolderFavoriteInput, FolderFavoriteOutput,
-    FolderIdentity, FolderMediaFilter, FolderMode, FolderPayload, FolderPreview,
+    CategoryPagePayload, EffectsMode, EffectsRenderer, FolderCounts, FolderFavoriteInput,
+    FolderFavoriteOutput, FolderIdentity, FolderMediaFilter, FolderPreview,
     FolderPreviewBatchError, FolderPreviewBatchInput, FolderPreviewBatchOutput, FolderTotals,
     MediaItem, MediaKind, PerfDiagEvent, PerfDiagEventsInput, PreviewDiagEvent,
-    PreviewDiagEventsInput, PreviewDiagPhase, SystemUsageAccount, SystemUsageFile,
-    SystemUsageReport, ViewerAccountSortMode, ViewerMediaSortMode, ViewerPreferences, ViewerTheme,
+    PreviewDiagEventsInput, PreviewDiagPhase, RootSummaryPayload, SystemUsageAccount,
+    SystemUsageFile, SystemUsageReport, ViewerAccountSortMode, ViewerMediaSortMode,
+    ViewerPreferences, ViewerTheme,
 };
 pub use thumbnail::ThumbnailError;
 use thumbnail::{default_thumbnail_generator, ThumbnailGenerator};
@@ -38,6 +38,7 @@ use thumbnail::{default_thumbnail_generator, ThumbnailGenerator};
 const IMAGE_THUMBNAIL_MIN_BYTES: u64 = 512 * 1024;
 const PREVIEW_RESTORE_LIMIT: usize = 64;
 const THUMBNAIL_FAILURE_TTL_MS: u64 = 60_000;
+const SYSTEM_USAGE_CACHE_TTL_MS: u64 = 60_000;
 const ENCODE_URI_COMPONENT_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -102,21 +103,19 @@ pub enum FolderSortOrder {
 }
 
 #[derive(Debug, Clone)]
-pub struct GetFolderOptions {
+pub struct GetCategoryOptions {
     pub cursor: Option<String>,
     pub limit: Option<usize>,
-    pub mode: FolderMode,
-    pub media_filter: Option<FolderMediaFilter>,
+    pub media_filter: FolderMediaFilter,
     pub sort_order: FolderSortOrder,
 }
 
-impl Default for GetFolderOptions {
+impl Default for GetCategoryOptions {
     fn default() -> Self {
         Self {
             cursor: None,
             limit: None,
-            mode: FolderMode::Full,
-            media_filter: None,
+            media_filter: FolderMediaFilter::Image,
             sort_order: FolderSortOrder::Desc,
         }
     }
@@ -148,12 +147,53 @@ impl BackendService {
         })
     }
 
-    pub async fn get_system_usage_report(&self, limit: usize) -> Result<SystemUsageReport> {
-        let root_path = self.config.media_root.clone();
+    pub async fn get_system_usage_report(
+        &self,
+        limit: usize,
+        bypass_cache: bool,
+    ) -> Result<SystemUsageReport> {
         let max_items = limit.max(1);
-        tokio::task::spawn_blocking(move || build_system_usage_report(&root_path, max_items))
-            .await
-            .map_err(|error| anyhow!("join system usage scan task: {error}"))?
+        let root_generation = self.path_generation("");
+        let cache_key = SystemUsageCacheKey {
+            limit: max_items,
+            root_generation,
+        };
+
+        if !bypass_cache {
+            if let Some(cached) = self
+                .caches
+                .lock()
+                .expect("scanner caches poisoned")
+                .system_usage
+                .get(&cache_key)
+                .filter(|entry| {
+                    now_ms_u64().saturating_sub(entry.cached_at_ms) <= SYSTEM_USAGE_CACHE_TTL_MS
+                })
+                .map(|entry| entry.report.clone())
+            {
+                return Ok(cached);
+            }
+        }
+
+        let root_path = self.config.media_root.clone();
+        let report =
+            tokio::task::spawn_blocking(move || build_system_usage_report(&root_path, max_items))
+                .await
+                .map_err(|error| anyhow!("join system usage scan task: {error}"))??;
+
+        self.caches
+            .lock()
+            .expect("scanner caches poisoned")
+            .system_usage
+            .insert(
+                cache_key,
+                SystemUsageCacheEntry {
+                    cached_at_ms: now_ms_u64(),
+                    report: report.clone(),
+                },
+            );
+
+        Ok(report)
     }
 
     pub async fn load_viewer_preferences(&self) -> Result<ViewerPreferences> {
@@ -217,38 +257,7 @@ pub struct FolderSnapshot {
     pub folder: FolderIdentity,
     pub breadcrumb: Vec<FolderIdentity>,
     pub subfolders: Vec<FolderPreview>,
-    pub media: Vec<MediaItem>,
     pub totals: FolderTotals,
-    pub default_page_media_json: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub enum MediaPage {
-    BorrowedRange { start: usize, end: usize },
-    Owned(Vec<MediaItem>),
-}
-
-impl MediaPage {
-    pub fn as_cow<'a>(&'a self, media: &'a [MediaItem]) -> Cow<'a, [MediaItem]> {
-        match self {
-            Self::BorrowedRange { start, end } => Cow::Borrowed(&media[*start..*end]),
-            Self::Owned(items) => Cow::Borrowed(items.as_slice()),
-        }
-    }
-
-    fn into_owned(self, media: &[MediaItem]) -> Vec<MediaItem> {
-        match self {
-            Self::BorrowedRange { start, end } => media[start..end].to_vec(),
-            Self::Owned(items) => items,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct FolderPageResult {
-    pub snapshot: Arc<FolderSnapshot>,
-    pub media_page: MediaPage,
-    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,6 +281,8 @@ struct DirectoryManifest {
     root_modified: f64,
     stamp: String,
     media: Vec<MediaItem>,
+    counts: FolderCounts,
+    media_total: usize,
     default_page_media_json: String,
     subfolders: Vec<FolderEntryCandidate>,
     subfolder_count: usize,
@@ -280,10 +291,29 @@ struct DirectoryManifest {
 
 #[derive(Default)]
 struct ScannerCaches {
-    snapshots: HashMap<String, (u64, Arc<FolderSnapshot>)>,
-    previews: HashMap<String, (u64, FolderPreview)>,
+    light_snapshots: HashMap<String, (u64, Arc<FolderSnapshot>)>,
+    previews: HashMap<PreviewCacheKey, (u64, FolderPreview)>,
     manifests: HashMap<String, (u64, DirectoryManifest)>,
     generations: HashMap<String, u64>,
+    system_usage: HashMap<SystemUsageCacheKey, SystemUsageCacheEntry>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct PreviewCacheKey {
+    path: String,
+    limit: usize,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct SystemUsageCacheKey {
+    limit: usize,
+    root_generation: u64,
+}
+
+#[derive(Debug, Clone)]
+struct SystemUsageCacheEntry {
+    cached_at_ms: u64,
+    report: SystemUsageReport,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -444,11 +474,18 @@ impl BackendService {
             while let Some(paths) = invalidate_rx.recv().await {
                 let mut caches = caches_for_task.lock().expect("scanner caches poisoned");
                 for path in paths {
-                    invalidate_path_and_ancestors(&mut caches.generations, &path);
+                    let invalidated = collect_path_and_ancestors(&path);
+                    for invalidated_path in invalidated {
+                        let next = caches
+                            .generations
+                            .get(&invalidated_path)
+                            .copied()
+                            .unwrap_or(0)
+                            + 1;
+                        caches.generations.insert(invalidated_path.clone(), next);
+                        remove_runtime_path_caches(&mut caches, &invalidated_path);
+                    }
                 }
-                caches.snapshots.clear();
-                caches.previews.clear();
-                caches.manifests.clear();
             }
         });
         let watch_registry = WatchRegistry::new(Arc::new(move |owners| {
@@ -495,48 +532,69 @@ impl BackendService {
         Self::new_with_thumbnail_generator(config, index, diagnostics, thumbnail_generator).await
     }
 
-    pub async fn get_folder(
-        &self,
-        relative_path: &str,
-        options: GetFolderOptions,
-    ) -> Result<FolderPayload> {
-        let page = self.get_folder_page(relative_path, options).await?;
-
-        Ok(FolderPayload {
-            folder: page.snapshot.folder.clone(),
-            breadcrumb: page.snapshot.breadcrumb.clone(),
-            subfolders: page.snapshot.subfolders.clone(),
-            media: page.media_page.into_owned(&page.snapshot.media),
-            totals: page.snapshot.totals.clone(),
-            next_cursor: page.next_cursor,
+    pub async fn get_root_summary(&self) -> Result<RootSummaryPayload> {
+        let snapshot = self.get_light_snapshot("").await?;
+        Ok(RootSummaryPayload {
+            folder: snapshot.folder.clone(),
+            breadcrumb: snapshot.breadcrumb.clone(),
+            subfolders: snapshot.subfolders.clone(),
+            totals: snapshot.totals.clone(),
         })
     }
 
-    pub async fn get_folder_page(
+    pub async fn get_category_page(
         &self,
         relative_path: &str,
-        options: GetFolderOptions,
-    ) -> Result<FolderPageResult> {
-        let snapshot = match options.mode {
-            FolderMode::Light => self.get_light_snapshot(relative_path).await?,
-            FolderMode::Full => self.get_full_snapshot(relative_path).await?,
-        };
+        options: GetCategoryOptions,
+    ) -> Result<CategoryPagePayload> {
+        let (safe_relative_path, absolute_path) = self.resolve_paths(relative_path).await?;
+        if safe_relative_path.is_empty() {
+            return Err(anyhow!("Category path must not be empty"));
+        }
+
+        let manifest = self
+            .get_directory_manifest(&absolute_path, &safe_relative_path, false)
+            .await?;
+        self.ensure_media_entries_for_manifest(&safe_relative_path, &manifest)
+            .await?;
+
         let cursor = parse_cursor(options.cursor.as_deref())?;
         let limit = options
             .limit
             .unwrap_or(self.config.folder_page_limit)
             .clamp(1, self.config.max_folder_page_limit);
-        let (media_page, next_cursor) = page_media_for_filter(
-            &snapshot.media,
-            cursor,
-            limit,
-            options.media_filter,
-            options.sort_order,
-        )?;
+        let filter_group = media_filter_group(options.media_filter).to_string();
+        let filtered_total = usize::try_from(
+            self.index
+                .count_media_entries(safe_relative_path.clone(), Some(filter_group.clone()))
+                .await?,
+        )
+        .unwrap_or(0);
+        if cursor > filtered_total {
+            return Err(anyhow!("Cursor exceeds media item count"));
+        }
 
-        Ok(FolderPageResult {
-            snapshot,
-            media_page,
+        let payloads = self
+            .index
+            .load_media_page_payloads(
+                safe_relative_path.clone(),
+                Some(filter_group),
+                options.sort_order == FolderSortOrder::Desc,
+                cursor as i64,
+                limit as i64,
+            )
+            .await?;
+        let media = deserialize_media_payloads(payloads)?;
+        let next_cursor =
+            (cursor + media.len() < filtered_total).then(|| (cursor + media.len()).to_string());
+
+        Ok(CategoryPagePayload {
+            folder: folder_identity(&self.config.media_root, &safe_relative_path),
+            breadcrumb: build_breadcrumb(&safe_relative_path),
+            media,
+            counts: manifest.counts.clone(),
+            total_media: manifest.media_total,
+            filtered_total,
             next_cursor,
         })
     }
@@ -920,10 +978,10 @@ impl BackendService {
     async fn get_light_snapshot(&self, relative_path: &str) -> Result<Arc<FolderSnapshot>> {
         let (safe_relative_path, absolute_path) = self.resolve_paths(relative_path).await?;
         let generation = self.path_generation(&safe_relative_path);
-        let cache_key = format!("light:{safe_relative_path}");
         let use_snapshot_cache = !safe_relative_path.is_empty();
         if use_snapshot_cache {
-            if let Some(snapshot) = self.read_snapshot_cache(&cache_key, generation) {
+            if let Some(snapshot) = self.read_light_snapshot_cache(&safe_relative_path, generation)
+            {
                 return Ok(snapshot);
             }
         }
@@ -948,63 +1006,18 @@ impl BackendService {
         subfolders.sort_by(|a, b| b.modified.total_cmp(&a.modified));
         subfolders = self.annotate_folder_favorites(subfolders).await?;
 
-        let mut media = self.build_media_items(scan.media_candidates).await?;
-        media.sort_by(compare_media_items_by_time_desc);
-
         let snapshot = Arc::new(FolderSnapshot {
             folder: folder_identity(&self.config.media_root, &safe_relative_path),
             breadcrumb: build_breadcrumb(&safe_relative_path),
             totals: FolderTotals {
-                media: media.len(),
+                media: scan.media_candidates.len(),
                 subfolders: subfolders.len(),
             },
             subfolders,
-            media,
-            default_page_media_json: None,
         });
         if use_snapshot_cache {
-            self.write_snapshot_cache(cache_key, generation, snapshot.clone());
+            self.write_light_snapshot_cache(safe_relative_path, generation, snapshot.clone());
         }
-        Ok(snapshot)
-    }
-
-    async fn get_full_snapshot(&self, relative_path: &str) -> Result<Arc<FolderSnapshot>> {
-        let (safe_relative_path, absolute_path) = self.resolve_paths(relative_path).await?;
-        let generation = self.path_generation(&safe_relative_path);
-        let cache_key = format!("full:{safe_relative_path}");
-        if let Some(snapshot) = self.read_snapshot_cache(&cache_key, generation) {
-            return Ok(snapshot);
-        }
-
-        let manifest = self
-            .get_directory_manifest(&absolute_path, &safe_relative_path, true)
-            .await?;
-        let mut subfolders = Vec::with_capacity(manifest.subfolders.len());
-        for child in &manifest.subfolders {
-            subfolders.push(
-                self.get_resolved_folder_preview(
-                    &child.absolute_path,
-                    &child.relative_path,
-                    self.config.preview_limit,
-                )
-                .await?,
-            );
-        }
-        subfolders.sort_by(|a, b| b.modified.total_cmp(&a.modified));
-        subfolders = self.annotate_folder_favorites(subfolders).await?;
-
-        let snapshot = Arc::new(FolderSnapshot {
-            folder: folder_identity(&self.config.media_root, &safe_relative_path),
-            breadcrumb: build_breadcrumb(&safe_relative_path),
-            totals: FolderTotals {
-                media: manifest.media.len(),
-                subfolders: subfolders.len(),
-            },
-            subfolders,
-            media: manifest.media.clone(),
-            default_page_media_json: Some(manifest.default_page_media_json.clone()),
-        });
-        self.write_snapshot_cache(cache_key, generation, snapshot.clone());
         Ok(snapshot)
     }
 
@@ -1025,13 +1038,18 @@ impl BackendService {
         preview_limit: usize,
     ) -> Result<FolderPreview> {
         let generation = self.path_generation(safe_relative_path);
-        let cache_key = format!("preview:{safe_relative_path}:{preview_limit}");
+        let cache_key = PreviewCacheKey {
+            path: safe_relative_path.to_string(),
+            limit: preview_limit,
+        };
         if let Some(preview) = self.read_preview_cache(&cache_key, generation) {
             return self.annotate_folder_favorite(preview).await;
         }
 
         let manifest = self
             .get_directory_manifest(absolute_path, safe_relative_path, false)
+            .await?;
+        self.ensure_media_entries_for_manifest(safe_relative_path, &manifest)
             .await?;
         let stamp = preview_stamp(&manifest.stamp, preview_limit);
         if let Some(serialized) = self
@@ -1044,19 +1062,23 @@ impl BackendService {
             .await?
         {
             let preview = serde_json::from_str::<FolderPreview>(&serialized)?;
-            self.write_preview_cache(cache_key, generation, preview.clone());
+            self.write_preview_cache(cache_key.clone(), generation, preview.clone());
             return self.annotate_folder_favorite(preview).await;
         }
 
-        let mut counts = FolderCounts {
-            subfolders: manifest.subfolder_count,
-            ..FolderCounts::default()
-        };
-        let mut modified = 0_f64;
-        for item in &manifest.media {
-            increment_counts(&mut counts, &item.kind);
-            modified = modified.max(item.modified);
-        }
+        let previews = self
+            .load_media_items_from_index(
+                safe_relative_path,
+                None,
+                FolderSortOrder::Desc,
+                0,
+                preview_limit.min(PREVIEW_RESTORE_LIMIT),
+            )
+            .await?;
+        let mut modified = previews
+            .iter()
+            .map(|item| item.modified)
+            .fold(0.0_f64, f64::max);
         if modified == 0.0 {
             modified = dir_modified(absolute_path).await.unwrap_or(0.0);
         }
@@ -1065,13 +1087,8 @@ impl BackendService {
             name: basename_or_root(safe_relative_path, &self.config.media_root),
             path: safe_relative_path.to_string(),
             modified,
-            counts,
-            previews: manifest
-                .media
-                .iter()
-                .take(preview_limit.min(PREVIEW_RESTORE_LIMIT))
-                .cloned()
-                .collect(),
+            counts: manifest.counts.clone(),
+            previews,
             counts_ready: true,
             preview_ready: true,
             favorite: false,
@@ -1097,8 +1114,7 @@ impl BackendService {
         allow_fast_restore: bool,
     ) -> Result<DirectoryManifest> {
         let generation = self.path_generation(safe_relative_path);
-        let cache_key = format!("manifest:{safe_relative_path}");
-        if let Some(manifest) = self.read_manifest_cache(&cache_key, generation) {
+        if let Some(manifest) = self.read_manifest_cache(safe_relative_path, generation) {
             return Ok(manifest);
         }
 
@@ -1108,13 +1124,35 @@ impl BackendService {
             .load_latest_manifest(safe_relative_path.to_string())
             .await?
         {
-            let persisted = self.hydrate_manifest_record(record)?;
+            if !self
+                .index
+                .has_media_entries(safe_relative_path.to_string())
+                .await?
+            {
+                if let Some(backfilled) = self
+                    .backfill_media_entries_from_legacy_manifest(safe_relative_path, &record)
+                    .await?
+                {
+                    self.install_manifest_watches(absolute_path, safe_relative_path, &backfilled);
+                    self.write_manifest_cache(
+                        safe_relative_path.to_string(),
+                        generation,
+                        backfilled.clone(),
+                    );
+                    return Ok(backfilled);
+                }
+            }
+
+            let persisted = self.hydrate_manifest_record(&record, false)?;
             if (persisted.root_modified - root_modified).abs() < f64::EPSILON {
                 if allow_fast_restore {
                     self.install_manifest_watches(absolute_path, safe_relative_path, &persisted);
-                    self.write_manifest_cache(cache_key.clone(), generation, persisted.clone());
+                    self.write_manifest_cache(
+                        safe_relative_path.to_string(),
+                        generation,
+                        persisted.clone(),
+                    );
                     self.schedule_manifest_validation(
-                        cache_key,
                         absolute_path.to_path_buf(),
                         safe_relative_path.to_string(),
                         generation,
@@ -1133,7 +1171,11 @@ impl BackendService {
                             .await?;
                     }
                     self.install_manifest_watches(absolute_path, safe_relative_path, &validated);
-                    self.write_manifest_cache(cache_key, generation, validated.clone());
+                    self.write_manifest_cache(
+                        safe_relative_path.to_string(),
+                        generation,
+                        validated.clone(),
+                    );
                     return Ok(validated);
                 }
             }
@@ -1144,7 +1186,7 @@ impl BackendService {
             .await?;
         self.persist_manifest(safe_relative_path, &manifest).await?;
         self.install_manifest_watches(absolute_path, safe_relative_path, &manifest);
-        self.write_manifest_cache(cache_key, generation, manifest.clone());
+        self.write_manifest_cache(safe_relative_path.to_string(), generation, manifest.clone());
         Ok(manifest)
     }
 
@@ -1161,16 +1203,26 @@ impl BackendService {
         media.sort_by(compare_media_items_by_time_desc);
         let default_page_media_json =
             build_default_page_media_json(&media, self.config.folder_page_limit)?;
+        let mut counts = FolderCounts {
+            subfolders: scan.subfolder_count,
+            ..FolderCounts::default()
+        };
+        for item in &media {
+            increment_counts(&mut counts, &item.kind);
+        }
 
         let mut manifest = DirectoryManifest {
             root_modified,
             stamp: String::new(),
             media,
+            counts,
+            media_total: 0,
             default_page_media_json,
             subfolders: scan.subfolders,
             subfolder_count: scan.subfolder_count,
             watched_directories: scan.watched_directories,
         };
+        manifest.media_total = manifest.media.len();
         manifest.stamp = build_manifest_stamp_from_manifest(&manifest);
         Ok(manifest)
     }
@@ -1180,14 +1232,6 @@ impl BackendService {
         safe_relative_path: &str,
         manifest: &DirectoryManifest,
     ) -> Result<()> {
-        let media_json = serde_json::to_string(&manifest.media)?;
-        let media_bin = bincode::serialize(
-            &manifest
-                .media
-                .iter()
-                .map(PersistedMediaBlob::from)
-                .collect::<Vec<_>>(),
-        )?;
         let media_records = manifest
             .media
             .iter()
@@ -1195,7 +1239,10 @@ impl BackendService {
             .map(|(ordinal, item)| PersistedMediaRecord {
                 ordinal: ordinal as i64,
                 media_path: item.path.clone(),
+                filter_group: media_filter_group_for_item(item).to_string(),
+                name: item.name.clone(),
                 kind: media_kind_as_str(&item.kind).to_string(),
+                sort_ts_ms: media_sort_time_key(item),
                 modified: item.modified,
                 size: item.size as i64,
                 payload_json: serde_json::to_string(item).expect("serialize media item"),
@@ -1207,10 +1254,14 @@ impl BackendService {
                 path: safe_relative_path.to_string(),
                 stamp: manifest.stamp.clone(),
                 root_modified: manifest.root_modified,
+                media_total: manifest.media_total as i64,
+                image_total: manifest.counts.images as i64,
+                gif_total: manifest.counts.gifs as i64,
+                video_total: manifest.counts.videos as i64,
                 subfolders_json: serde_json::to_string(&manifest.subfolders)?,
                 watched_dirs_json: serde_json::to_string(&manifest.watched_directories)?,
-                media_json,
-                media_bin,
+                media_json: "[]".to_string(),
+                media_bin: Vec::new(),
                 default_page_media_json: manifest.default_page_media_json.clone(),
                 media: media_records,
             })
@@ -1219,43 +1270,129 @@ impl BackendService {
 
     fn hydrate_manifest_record(
         &self,
-        record: tmv_backend_index::PersistedManifestRecord,
+        record: &tmv_backend_index::PersistedManifestRecord,
+        include_legacy_media: bool,
     ) -> Result<DirectoryManifest> {
         let subfolders =
             serde_json::from_str::<Vec<FolderEntryCandidate>>(&record.subfolders_json)?;
         let watched_directories =
             serde_json::from_str::<Vec<FolderEntryCandidate>>(&record.watched_dirs_json)?;
-        let mut media: Vec<MediaItem> = match record.media_bin {
-            Some(media_bin) if !media_bin.is_empty() => {
-                let persisted = bincode::deserialize::<Vec<PersistedMediaBlob>>(&media_bin)?;
-                persisted
+        let mut media: Vec<MediaItem> = if include_legacy_media {
+            match &record.media_bin {
+                Some(media_bin) if !media_bin.is_empty() => {
+                    let persisted = bincode::deserialize::<Vec<PersistedMediaBlob>>(media_bin)?;
+                    persisted
+                        .into_iter()
+                        .map(MediaItem::from)
+                        .map(normalize_media_item_capabilities)
+                        .collect()
+                }
+                _ => serde_json::from_str::<Vec<MediaItem>>(&record.media_json)?
                     .into_iter()
-                    .map(MediaItem::from)
                     .map(normalize_media_item_capabilities)
-                    .collect()
+                    .collect(),
             }
-            _ => serde_json::from_str::<Vec<MediaItem>>(&record.media_json)?
-                .into_iter()
-                .map(normalize_media_item_capabilities)
-                .collect(),
+        } else {
+            Vec::new()
         };
         media.sort_by(compare_media_items_by_time_desc);
-        let default_page_media_json =
-            build_default_page_media_json(&media, self.config.folder_page_limit)?;
+        let mut counts = FolderCounts {
+            images: usize::try_from(record.image_total).unwrap_or(0),
+            gifs: usize::try_from(record.gif_total).unwrap_or(0),
+            videos: usize::try_from(record.video_total).unwrap_or(0),
+            subfolders: subfolders.len(),
+        };
+        let mut media_total = usize::try_from(record.media_total).unwrap_or(0);
+        if media_total == 0 && !media.is_empty() {
+            media_total = media.len();
+        }
+        if counts.images == 0 && counts.gifs == 0 && counts.videos == 0 && !media.is_empty() {
+            for item in &media {
+                increment_counts(&mut counts, &item.kind);
+            }
+            media_total = media.len();
+        }
+        let default_page_media_json = match record.default_page_media_json.as_deref() {
+            Some(value) if !value.trim().is_empty() => value.to_string(),
+            _ => build_default_page_media_json(&media, self.config.folder_page_limit)?,
+        };
         Ok(DirectoryManifest {
             root_modified: record.root_modified,
-            stamp: record.stamp,
+            stamp: record.stamp.clone(),
             subfolder_count: subfolders.len(),
             subfolders,
             watched_directories,
             media,
+            counts,
+            media_total,
             default_page_media_json,
         })
     }
 
+    async fn backfill_media_entries_from_legacy_manifest(
+        &self,
+        safe_relative_path: &str,
+        record: &tmv_backend_index::PersistedManifestRecord,
+    ) -> Result<Option<DirectoryManifest>> {
+        let hydrated = self.hydrate_manifest_record(record, true)?;
+        if hydrated.media.is_empty() {
+            return Ok(None);
+        }
+        self.persist_manifest(safe_relative_path, &hydrated).await?;
+        Ok(Some(DirectoryManifest {
+            media: Vec::new(),
+            ..hydrated
+        }))
+    }
+
+    async fn ensure_media_entries_for_manifest(
+        &self,
+        safe_relative_path: &str,
+        manifest: &DirectoryManifest,
+    ) -> Result<()> {
+        if self
+            .index
+            .has_media_entries(safe_relative_path.to_string())
+            .await?
+        {
+            return Ok(());
+        }
+
+        if manifest.media.is_empty() {
+            return Err(anyhow!(
+                "missing media index for folder {safe_relative_path}"
+            ));
+        }
+
+        self.persist_manifest(safe_relative_path, manifest).await
+    }
+
+    async fn load_media_items_from_index(
+        &self,
+        safe_relative_path: &str,
+        filter_group: Option<&str>,
+        sort_order: FolderSortOrder,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<MediaItem>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let payloads = self
+            .index
+            .load_media_page_payloads(
+                safe_relative_path.to_string(),
+                filter_group.map(ToString::to_string),
+                sort_order == FolderSortOrder::Desc,
+                offset as i64,
+                limit as i64,
+            )
+            .await?;
+        deserialize_media_payloads(payloads)
+    }
+
     fn schedule_manifest_validation(
         &self,
-        cache_key: String,
         absolute_path: PathBuf,
         safe_relative_path: String,
         generation: u64,
@@ -1267,7 +1404,7 @@ impl BackendService {
                 .manifest_validations
                 .lock()
                 .expect("manifest validations poisoned");
-            if !validations.insert(cache_key.clone()) {
+            if !validations.insert(safe_relative_path.clone()) {
                 return;
             }
         }
@@ -1287,7 +1424,11 @@ impl BackendService {
                         &safe_relative_path,
                         &validated,
                     );
-                    service.write_manifest_cache(cache_key.clone(), generation, validated.clone());
+                    service.write_manifest_cache(
+                        safe_relative_path.clone(),
+                        generation,
+                        validated.clone(),
+                    );
                     if should_persist {
                         let _ = service
                             .persist_manifest(&safe_relative_path, &validated)
@@ -1304,7 +1445,7 @@ impl BackendService {
                 .manifest_validations
                 .lock()
                 .expect("manifest validations poisoned")
-                .remove(&cache_key);
+                .remove(&safe_relative_path);
         });
     }
 
@@ -1325,6 +1466,16 @@ impl BackendService {
             return Ok(None);
         };
 
+        if !refreshed_watch.changed_category_dirs.is_empty()
+            || !refreshed_watch.changed_subfolders.is_empty()
+        {
+            let (_, absolute_path) = self.resolve_paths(safe_relative_path).await?;
+            let rebuilt = self
+                .build_directory_manifest(&absolute_path, safe_relative_path, root_modified)
+                .await?;
+            return Ok(Some((rebuilt, true)));
+        }
+
         let mut subfolders = Vec::with_capacity(persisted.subfolders.len());
         for subfolder in &persisted.subfolders {
             let Some(refreshed) = refreshed_watch.by_path.get(&subfolder.relative_path) else {
@@ -1333,88 +1484,15 @@ impl BackendService {
             subfolders.push(refreshed.clone());
         }
 
-        let changed_category_paths = refreshed_watch
-            .changed_category_dirs
-            .iter()
-            .map(|entry| entry.relative_path.clone())
-            .collect::<HashSet<_>>();
-
-        let unchanged_media = persisted
-            .media
-            .iter()
-            .filter(|item| {
-                let parent = Path::new(&item.path)
-                    .parent()
-                    .map(|value| value.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_default();
-                !changed_category_paths.contains(&parent)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let refreshed_media = stream::iter(
-            unchanged_media
-                .into_iter()
-                .map(|item| async move { self.validate_persisted_media_item(item).await }),
-        )
-        .buffered(self.config.stat_concurrency.max(1))
-        .collect::<Vec<Result<Option<MediaItem>>>>()
-        .await;
-
-        let mut media = Vec::new();
-        for item in refreshed_media {
-            let Some(item) = item? else {
-                return Ok(None);
-            };
-            media.push(item);
-        }
-
-        let changed_category_dirs = refreshed_watch.changed_category_dirs.clone();
-        let category_scan_service = self.clone();
-        let refreshed_category_candidates =
-            stream::iter(changed_category_dirs.into_iter().map(move |entry| {
-                let service = category_scan_service.clone();
-                async move {
-                    service
-                        .collect_direct_media_candidates(&entry.absolute_path, &entry.relative_path)
-                        .await
-                }
-            }))
-            .buffered(clamp(self.config.stat_concurrency / 2, 2, 8))
-            .collect::<Vec<Result<Vec<MediaCandidate>>>>()
-            .await;
-
-        let mut category_candidates = Vec::new();
-        for candidates in refreshed_category_candidates {
-            category_candidates.extend(candidates?);
-        }
-        if !category_candidates.is_empty() {
-            media.extend(self.build_media_items(category_candidates).await?);
-        }
-        media.sort_by(compare_media_items_by_time_desc);
-        let default_page_media_json =
-            build_default_page_media_json(&media, self.config.folder_page_limit)?;
-
-        let mut manifest = DirectoryManifest {
-            root_modified,
-            stamp: String::new(),
-            subfolder_count: subfolders.len(),
-            subfolders,
-            watched_directories: refreshed_watch.entries,
-            media,
-            default_page_media_json,
-        };
-        manifest.stamp = build_manifest_stamp_from_manifest(&manifest);
-
-        let should_persist = !refreshed_watch.changed_category_dirs.is_empty()
-            || !refreshed_watch.changed_subfolders.is_empty()
-            || manifest.stamp != persisted.stamp;
-
-        if safe_relative_path.is_empty() && manifest.media.is_empty() && persisted.media.is_empty()
-        {
-            return Ok(Some((manifest, should_persist)));
-        }
-
-        Ok(Some((manifest, should_persist)))
+        Ok(Some((
+            DirectoryManifest {
+                subfolders,
+                watched_directories: refreshed_watch.entries,
+                media: Vec::new(),
+                ..persisted
+            },
+            false,
+        )))
     }
 
     async fn refresh_persisted_watched_directories(
@@ -1497,43 +1575,23 @@ impl BackendService {
         }))
     }
 
-    async fn validate_persisted_media_item(&self, item: MediaItem) -> Result<Option<MediaItem>> {
-        let resolved = match self.resolve_media_file(&item.path).await {
-            Ok(resolved) => resolved,
-            Err(error) if is_ignorable_entry_resolution_error(&error) => return Ok(None),
-            Err(error) => return Err(error),
-        };
-        let metadata = match fs::metadata(&resolved.absolute_path).await {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        if !metadata.is_file() {
-            return Ok(None);
-        }
-        Ok(Some(build_media_item(
-            &basename_or_root(&resolved.safe_relative_path, &self.config.media_root),
-            &resolved.safe_relative_path,
-            &resolved.kind,
-            metadata.len(),
-            modified_ms(&metadata),
-        )))
-    }
-
     fn invalidate_runtime_path(&self, path: &str) {
         let mut caches = self.caches.lock().expect("scanner caches poisoned");
-        invalidate_path_and_ancestors(&mut caches.generations, path);
-        caches.snapshots.clear();
-        caches.previews.clear();
-        caches.manifests.clear();
+        for invalidated_path in collect_path_and_ancestors(path) {
+            let next = caches
+                .generations
+                .get(&invalidated_path)
+                .copied()
+                .unwrap_or(0)
+                + 1;
+            caches.generations.insert(invalidated_path.clone(), next);
+            remove_runtime_path_caches(&mut caches, &invalidated_path);
+        }
     }
 
     fn clear_snapshot_cache(&self) {
-        self.caches
-            .lock()
-            .expect("scanner caches poisoned")
-            .snapshots
-            .clear();
+        let mut caches = self.caches.lock().expect("scanner caches poisoned");
+        caches.light_snapshots.clear();
     }
 
     async fn annotate_folder_favorite(&self, mut preview: FolderPreview) -> Result<FolderPreview> {
@@ -1728,25 +1786,34 @@ impl BackendService {
             .unwrap_or(0)
     }
 
-    fn read_snapshot_cache(&self, key: &str, generation: u64) -> Option<Arc<FolderSnapshot>> {
+    fn read_light_snapshot_cache(
+        &self,
+        path: &str,
+        generation: u64,
+    ) -> Option<Arc<FolderSnapshot>> {
         self.caches
             .lock()
             .expect("scanner caches poisoned")
-            .snapshots
-            .get(key)
+            .light_snapshots
+            .get(path)
             .filter(|(stored_generation, _)| *stored_generation == generation)
             .map(|(_, snapshot)| Arc::clone(snapshot))
     }
 
-    fn write_snapshot_cache(&self, key: String, generation: u64, snapshot: Arc<FolderSnapshot>) {
+    fn write_light_snapshot_cache(
+        &self,
+        path: String,
+        generation: u64,
+        snapshot: Arc<FolderSnapshot>,
+    ) {
         self.caches
             .lock()
             .expect("scanner caches poisoned")
-            .snapshots
-            .insert(key, (generation, snapshot));
+            .light_snapshots
+            .insert(path, (generation, snapshot));
     }
 
-    fn read_preview_cache(&self, key: &str, generation: u64) -> Option<FolderPreview> {
+    fn read_preview_cache(&self, key: &PreviewCacheKey, generation: u64) -> Option<FolderPreview> {
         self.caches
             .lock()
             .expect("scanner caches poisoned")
@@ -1756,7 +1823,7 @@ impl BackendService {
             .map(|(_, preview)| preview.clone())
     }
 
-    fn write_preview_cache(&self, key: String, generation: u64, preview: FolderPreview) {
+    fn write_preview_cache(&self, key: PreviewCacheKey, generation: u64, preview: FolderPreview) {
         self.caches
             .lock()
             .expect("scanner caches poisoned")
@@ -1764,22 +1831,22 @@ impl BackendService {
             .insert(key, (generation, preview));
     }
 
-    fn read_manifest_cache(&self, key: &str, generation: u64) -> Option<DirectoryManifest> {
+    fn read_manifest_cache(&self, path: &str, generation: u64) -> Option<DirectoryManifest> {
         self.caches
             .lock()
             .expect("scanner caches poisoned")
             .manifests
-            .get(key)
+            .get(path)
             .filter(|(stored_generation, _)| *stored_generation == generation)
             .map(|(_, manifest)| manifest.clone())
     }
 
-    fn write_manifest_cache(&self, key: String, generation: u64, manifest: DirectoryManifest) {
+    fn write_manifest_cache(&self, path: String, generation: u64, manifest: DirectoryManifest) {
         self.caches
             .lock()
             .expect("scanner caches poisoned")
             .manifests
-            .insert(key, (generation, manifest));
+            .insert(path, (generation, manifest));
     }
 }
 
@@ -1827,91 +1894,6 @@ fn clamp(value: usize, min: usize, max: usize) -> usize {
 fn build_default_page_media_json(media: &[MediaItem], limit: usize) -> Result<String> {
     let end = media.len().min(limit);
     serde_json::to_string(&media[..end]).map_err(Into::into)
-}
-
-pub fn page_media_for_filter(
-    media: &[MediaItem],
-    cursor: usize,
-    limit: usize,
-    filter: Option<FolderMediaFilter>,
-    sort_order: FolderSortOrder,
-) -> Result<(MediaPage, Option<String>)> {
-    if sort_order == FolderSortOrder::Asc {
-        return page_media_for_filter_asc(media, cursor, limit, filter);
-    }
-
-    if filter.is_none() {
-        if cursor > media.len() {
-            return Err(anyhow!("Cursor exceeds media item count"));
-        }
-        let end = (cursor + limit).min(media.len());
-        let next_index = end;
-        return Ok((
-            MediaPage::BorrowedRange { start: cursor, end },
-            (next_index < media.len()).then(|| next_index.to_string()),
-        ));
-    }
-
-    let filter = filter.expect("checked is_some");
-    let mut items = Vec::new();
-    let mut matched_count = 0usize;
-    let mut has_more = false;
-
-    for item in media {
-        if !matches_filter(item, filter) {
-            continue;
-        }
-        if matched_count < cursor {
-            matched_count += 1;
-            continue;
-        }
-        if items.len() < limit {
-            items.push(item.clone());
-            matched_count += 1;
-            continue;
-        }
-        has_more = true;
-        break;
-    }
-
-    if cursor > matched_count {
-        return Err(anyhow!("Cursor exceeds media item count"));
-    }
-
-    let next_cursor = has_more.then(|| (cursor + items.len()).to_string());
-    Ok((MediaPage::Owned(items), next_cursor))
-}
-
-fn page_media_for_filter_asc(
-    media: &[MediaItem],
-    cursor: usize,
-    limit: usize,
-    filter: Option<FolderMediaFilter>,
-) -> Result<(MediaPage, Option<String>)> {
-    let mut sorted = match filter {
-        Some(filter) => media
-            .iter()
-            .filter(|item| matches_filter(item, filter))
-            .cloned()
-            .collect::<Vec<_>>(),
-        None => media.to_vec(),
-    };
-    sorted.sort_by(compare_media_items_by_time_asc);
-
-    if cursor > sorted.len() {
-        return Err(anyhow!("Cursor exceeds media item count"));
-    }
-
-    let end = (cursor + limit).min(sorted.len());
-    let next_cursor = (end < sorted.len()).then(|| end.to_string());
-    Ok((MediaPage::Owned(sorted[cursor..end].to_vec()), next_cursor))
-}
-
-fn matches_filter(item: &MediaItem, filter: FolderMediaFilter) -> bool {
-    match filter {
-        FolderMediaFilter::Video => item.kind == MediaKind::Video,
-        FolderMediaFilter::Image => matches!(item.kind, MediaKind::Image | MediaKind::Gif),
-    }
 }
 
 fn media_kind_as_str(kind: &MediaKind) -> &'static str {
@@ -2083,13 +2065,6 @@ fn normalize_media_item_capabilities(item: MediaItem) -> MediaItem {
 fn compare_media_items_by_time_desc(left: &MediaItem, right: &MediaItem) -> std::cmp::Ordering {
     media_sort_time_key(right)
         .cmp(&media_sort_time_key(left))
-        .then_with(|| left.name.cmp(&right.name))
-        .then_with(|| left.path.cmp(&right.path))
-}
-
-fn compare_media_items_by_time_asc(left: &MediaItem, right: &MediaItem) -> std::cmp::Ordering {
-    media_sort_time_key(left)
-        .cmp(&media_sort_time_key(right))
         .then_with(|| left.name.cmp(&right.name))
         .then_with(|| left.path.cmp(&right.path))
 }
@@ -2381,11 +2356,11 @@ fn join_relative(base: &str, name: &str) -> String {
     }
 }
 
-fn invalidate_path_and_ancestors(generations: &mut HashMap<String, u64>, path: &str) {
+fn collect_path_and_ancestors(path: &str) -> Vec<String> {
+    let mut collected = Vec::new();
     let mut current = Some(path.to_string());
     while let Some(value) = current.take() {
-        let next = generations.get(&value).copied().unwrap_or(0) + 1;
-        generations.insert(value.clone(), next);
+        collected.push(value.clone());
         current = if value.is_empty() {
             None
         } else {
@@ -2396,6 +2371,39 @@ fn invalidate_path_and_ancestors(generations: &mut HashMap<String, u64>, path: &
                     .unwrap_or_default(),
             )
         };
+    }
+    collected
+}
+
+fn remove_runtime_path_caches(caches: &mut ScannerCaches, path: &str) {
+    caches.light_snapshots.remove(path);
+    caches.manifests.remove(path);
+    caches.previews.retain(|key, _| key.path.as_str() != path);
+    caches.system_usage.clear();
+}
+
+fn deserialize_media_payloads(payloads: Vec<String>) -> Result<Vec<MediaItem>> {
+    payloads
+        .into_iter()
+        .map(|payload| {
+            serde_json::from_str::<MediaItem>(&payload)
+                .map(normalize_media_item_capabilities)
+                .map_err(Into::into)
+        })
+        .collect()
+}
+
+fn media_filter_group(filter: FolderMediaFilter) -> &'static str {
+    match filter {
+        FolderMediaFilter::Image => "image",
+        FolderMediaFilter::Video => "video",
+    }
+}
+
+fn media_filter_group_for_item(item: &MediaItem) -> &'static str {
+    match item.kind {
+        MediaKind::Video => "video",
+        MediaKind::Image | MediaKind::Gif => "image",
     }
 }
 
@@ -2478,9 +2486,8 @@ fn thumbnail_worker_limit() -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_system_usage_report, modified_ms, page_media_for_filter, BackendConfig,
-        BackendService, DiagnosticsWriter, FolderMediaFilter, FolderMode, FolderSortOrder,
-        GetFolderOptions, IndexStore, MediaItem, MediaKind,
+        build_system_usage_report, modified_ms, BackendConfig, BackendService, DiagnosticsWriter,
+        FolderMediaFilter, FolderSortOrder, GetCategoryOptions, IndexStore, MediaKind,
     };
     use crate::thumbnail::{ThumbnailError, ThumbnailGenerator};
     use anyhow::Result;
@@ -2636,23 +2643,14 @@ mod tests {
         )
         .await?;
 
-        let light = service
-            .get_folder(
-                "",
-                GetFolderOptions {
-                    mode: FolderMode::Light,
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let light = service.get_root_summary().await?;
         assert_eq!(light.subfolders.len(), 1);
 
         let full = service
-            .get_folder(
+            .get_category_page(
                 "alpha",
-                GetFolderOptions {
-                    mode: FolderMode::Full,
-                    media_filter: Some(FolderMediaFilter::Image),
+                GetCategoryOptions {
+                    media_filter: FolderMediaFilter::Image,
                     ..Default::default()
                 },
             )
@@ -2681,15 +2679,7 @@ mod tests {
         )
         .await?;
 
-        let first = service
-            .get_folder(
-                "",
-                GetFolderOptions {
-                    mode: FolderMode::Light,
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let first = service.get_root_summary().await?;
         assert_eq!(first.subfolders[0].path, "beta");
         let first_alpha_modified = first
             .subfolders
@@ -2701,15 +2691,7 @@ mod tests {
         sleep(Duration::from_millis(25)).await;
         fs::write(root.join("alpha/c.jpg"), b"alpha-fresh").await?;
 
-        let second = service
-            .get_folder(
-                "",
-                GetFolderOptions {
-                    mode: FolderMode::Light,
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let second = service.get_root_summary().await?;
         let second_alpha_modified = second
             .subfolders
             .iter()
@@ -2739,30 +2721,14 @@ mod tests {
         )
         .await?;
 
-        let initial = service
-            .get_folder(
-                "",
-                GetFolderOptions {
-                    mode: FolderMode::Light,
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let initial = service.get_root_summary().await?;
         assert!(
             initial.subfolders.iter().all(|item| !item.favorite),
             "new root snapshots should start without favorites"
         );
 
         service.set_folder_favorite("alpha", true).await?;
-        let favorited = service
-            .get_folder(
-                "",
-                GetFolderOptions {
-                    mode: FolderMode::Light,
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let favorited = service.get_root_summary().await?;
         assert_eq!(
             favorited
                 .subfolders
@@ -2773,15 +2739,7 @@ mod tests {
         );
 
         service.set_folder_favorite("alpha", false).await?;
-        let cleared = service
-            .get_folder(
-                "",
-                GetFolderOptions {
-                    mode: FolderMode::Light,
-                    ..Default::default()
-                },
-            )
-            .await?;
+        let cleared = service.get_root_summary().await?;
         assert_eq!(
             cleared
                 .subfolders
@@ -2834,48 +2792,44 @@ mod tests {
         .await?;
 
         let first_page = service
-            .get_folder(
+            .get_category_page(
                 "alpha",
-                GetFolderOptions {
+                GetCategoryOptions {
                     limit: Some(2),
-                    mode: FolderMode::Full,
-                    media_filter: Some(FolderMediaFilter::Image),
+                    media_filter: FolderMediaFilter::Image,
                     ..Default::default()
                 },
             )
             .await?;
         let second_page = service
-            .get_folder(
+            .get_category_page(
                 "alpha",
-                GetFolderOptions {
+                GetCategoryOptions {
                     cursor: first_page.next_cursor.clone(),
                     limit: Some(2),
-                    mode: FolderMode::Full,
-                    media_filter: Some(FolderMediaFilter::Image),
+                    media_filter: FolderMediaFilter::Image,
                     sort_order: FolderSortOrder::Desc,
                 },
             )
             .await?;
         let first_page_asc = service
-            .get_folder(
+            .get_category_page(
                 "alpha",
-                GetFolderOptions {
+                GetCategoryOptions {
                     limit: Some(2),
-                    mode: FolderMode::Full,
-                    media_filter: Some(FolderMediaFilter::Image),
+                    media_filter: FolderMediaFilter::Image,
                     sort_order: FolderSortOrder::Asc,
                     ..Default::default()
                 },
             )
             .await?;
         let second_page_asc = service
-            .get_folder(
+            .get_category_page(
                 "alpha",
-                GetFolderOptions {
+                GetCategoryOptions {
                     cursor: first_page_asc.next_cursor.clone(),
                     limit: Some(2),
-                    mode: FolderMode::Full,
-                    media_filter: Some(FolderMediaFilter::Image),
+                    media_filter: FolderMediaFilter::Image,
                     sort_order: FolderSortOrder::Asc,
                 },
             )
@@ -2917,70 +2871,225 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn pages_ascending_media_without_reversing_same_timestamp_groups() -> Result<()> {
-        let media = vec![
-            MediaItem {
-                name: "IMG_20260102_000000_01.jpg".to_string(),
-                path: "alpha/IMG_20260102_000000_01.jpg".to_string(),
-                url: "/media/alpha/IMG_20260102_000000_01.jpg".to_string(),
-                thumbnail_url: None,
-                kind: MediaKind::Image,
-                size: 1,
-                modified: 4.0,
-            },
-            MediaItem {
-                name: "IMG_20260102_000000_02.jpg".to_string(),
-                path: "alpha/IMG_20260102_000000_02.jpg".to_string(),
-                url: "/media/alpha/IMG_20260102_000000_02.jpg".to_string(),
-                thumbnail_url: None,
-                kind: MediaKind::Image,
-                size: 1,
-                modified: 3.0,
-            },
-            MediaItem {
-                name: "IMG_20260101_000000_01.jpg".to_string(),
-                path: "alpha/IMG_20260101_000000_01.jpg".to_string(),
-                url: "/media/alpha/IMG_20260101_000000_01.jpg".to_string(),
-                thumbnail_url: None,
-                kind: MediaKind::Image,
-                size: 1,
-                modified: 2.0,
-            },
-            MediaItem {
-                name: "IMG_20260101_000000_02.jpg".to_string(),
-                path: "alpha/IMG_20260101_000000_02.jpg".to_string(),
-                url: "/media/alpha/IMG_20260101_000000_02.jpg".to_string(),
-                thumbnail_url: None,
-                kind: MediaKind::Image,
-                size: 1,
-                modified: 1.0,
-            },
-        ];
+    #[tokio::test]
+    async fn category_page_uses_index_paging_and_filtered_totals() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        fs::create_dir_all(root.join("alpha/videos")).await?;
+        fs::write(
+            root.join("alpha/images/IMG_20260103_000000.jpg"),
+            b"image-3",
+        )
+        .await?;
+        fs::write(
+            root.join("alpha/images/IMG_20260102_000000.jpg"),
+            b"image-2",
+        )
+        .await?;
+        fs::write(
+            root.join("alpha/images/IMG_20260101_000000.jpg"),
+            b"image-1",
+        )
+        .await?;
+        fs::write(
+            root.join("alpha/videos/VID_20260102_000000.mp4"),
+            b"video-2",
+        )
+        .await?;
+        fs::write(
+            root.join("alpha/videos/VID_20260101_000000.mp4"),
+            b"video-1",
+        )
+        .await?;
 
-        let (page, next_cursor) = page_media_for_filter(
-            &media,
-            0,
-            4,
-            Some(FolderMediaFilter::Image),
-            FolderSortOrder::Asc,
-        )?;
-        let ordered = page
-            .into_owned(&media)
-            .into_iter()
-            .map(|item| item.name)
-            .collect::<Vec<_>>();
+        let service = BackendService::new(
+            test_backend_config(root.clone(), thumbs),
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
 
-        assert_eq!(next_cursor, None);
+        let first_page = service
+            .get_category_page(
+                "alpha",
+                GetCategoryOptions {
+                    limit: Some(2),
+                    media_filter: FolderMediaFilter::Image,
+                    sort_order: FolderSortOrder::Desc,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let second_page = service
+            .get_category_page(
+                "alpha",
+                GetCategoryOptions {
+                    cursor: first_page.next_cursor.clone(),
+                    limit: Some(2),
+                    media_filter: FolderMediaFilter::Image,
+                    sort_order: FolderSortOrder::Desc,
+                },
+            )
+            .await?;
+        let video_page = service
+            .get_category_page(
+                "alpha",
+                GetCategoryOptions {
+                    limit: Some(2),
+                    media_filter: FolderMediaFilter::Video,
+                    sort_order: FolderSortOrder::Asc,
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(first_page.counts.images, 3);
+        assert_eq!(first_page.counts.videos, 2);
+        assert_eq!(first_page.total_media, 5);
+        assert_eq!(first_page.filtered_total, 3);
         assert_eq!(
-            ordered,
-            vec![
-                "IMG_20260101_000000_01.jpg",
-                "IMG_20260101_000000_02.jpg",
-                "IMG_20260102_000000_01.jpg",
-                "IMG_20260102_000000_02.jpg",
-            ]
+            first_page
+                .media
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IMG_20260103_000000.jpg", "IMG_20260102_000000.jpg"]
         );
+        assert_eq!(
+            second_page
+                .media
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IMG_20260101_000000.jpg"]
+        );
+        assert_eq!(second_page.next_cursor, None);
+        assert_eq!(video_page.filtered_total, 2);
+        assert_eq!(
+            video_page
+                .media
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["VID_20260101_000000.mp4", "VID_20260102_000000.mp4"]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn category_page_backfills_missing_media_entries_from_legacy_manifest() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        fs::write(
+            root.join("alpha/images/IMG_20260101_000000.jpg"),
+            b"image-1",
+        )
+        .await?;
+        fs::write(
+            root.join("alpha/images/IMG_20260102_000000.jpg"),
+            b"image-2",
+        )
+        .await?;
+
+        let service = BackendService::new(
+            test_backend_config(root.clone(), thumbs),
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+
+        let initial = service
+            .get_category_page(
+                "alpha",
+                GetCategoryOptions {
+                    media_filter: FolderMediaFilter::Image,
+                    sort_order: FolderSortOrder::Desc,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        let legacy_media_json = serde_json::to_string(&initial.media)?;
+
+        service
+            .index
+            .interact(move |conn| {
+                conn.execute("DELETE FROM media_entry WHERE folder_path = 'alpha'", [])?;
+                conn.execute(
+                    "UPDATE folder_manifest SET media_json = ?1 WHERE path = 'alpha'",
+                    [legacy_media_json],
+                )?;
+                Ok(())
+            })
+            .await?;
+        service.invalidate_runtime_path("alpha");
+
+        let restored = service
+            .get_category_page(
+                "alpha",
+                GetCategoryOptions {
+                    media_filter: FolderMediaFilter::Image,
+                    sort_order: FolderSortOrder::Desc,
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        assert_eq!(
+            restored
+                .media
+                .iter()
+                .map(|item| item.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["IMG_20260102_000000.jpg", "IMG_20260101_000000.jpg"]
+        );
+        assert!(
+            service.index.has_media_entries("alpha".to_string()).await?,
+            "legacy manifest should repopulate media_entry rows"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn system_usage_cache_can_be_bypassed() -> Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        fs::write(root.join("alpha/images/pic.jpg"), vec![0_u8; 10]).await?;
+
+        let service = BackendService::new(
+            test_backend_config(root.clone(), thumbs),
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+
+        let first = service.get_system_usage_report(10, false).await?;
+        fs::create_dir_all(root.join("alpha/videos")).await?;
+        fs::write(root.join("alpha/videos/clip.mp4"), vec![0_u8; 20]).await?;
+
+        let cached = service.get_system_usage_report(10, false).await?;
+        let refreshed = service.get_system_usage_report(10, true).await?;
+
+        assert_eq!(cached.generated_at, first.generated_at);
+        assert_eq!(cached.items[0].total_size, first.items[0].total_size);
+        assert_eq!(
+            refreshed.items[0].total_size,
+            first.items[0].total_size + 20
+        );
+        assert!(refreshed.generated_at >= cached.generated_at);
 
         Ok(())
     }

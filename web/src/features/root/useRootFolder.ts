@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fetchFolder } from "../../api";
-import type { FolderPayload } from "../../types";
+import { fetchRootSummary } from "../../api";
+import type { RootSummaryPayload } from "../../types";
 import { createRootFolderStore } from "./rootStore";
-
-const SERVER_PAGE_SIZE = 240;
 
 const isAbortError = (error: unknown) =>
   error instanceof DOMException && error.name === "AbortError";
@@ -23,7 +21,7 @@ export function useRootFolder(options: UseRootFolderOptions = {}) {
   const abortRef = useRef<AbortController | null>(null);
   const requestSeq = useRef(0);
 
-  const loadRoot = useCallback(async (): Promise<FolderPayload | null> => {
+  const loadRoot = useCallback(async (): Promise<RootSummaryPayload | null> => {
     abortRef.current?.abort();
     onBeforeLoad?.();
     const controller = new AbortController();
@@ -34,11 +32,7 @@ export function useRootFolder(options: UseRootFolderOptions = {}) {
     setError(null);
 
     try {
-      const payload = await fetchFolder("", {
-        limit: SERVER_PAGE_SIZE,
-        mode: "light",
-        signal: controller.signal,
-      });
+      const payload = await fetchRootSummary({ signal: controller.signal });
       if (requestId !== requestSeq.current) return null;
       store.replaceRoot(payload);
       return payload;

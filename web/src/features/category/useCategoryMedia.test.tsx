@@ -1,15 +1,15 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { fetchFolder } from "../../api";
-import type { FolderPayload } from "../../types";
+import { fetchCategoryPage } from "../../api";
+import type { CategoryPagePayload } from "../../types";
 import { makePerfMediaItem } from "../../test/performanceFixtures";
 import { createQueryClientWrapper } from "../../test/queryClient";
 import { useCategoryMedia } from "./useCategoryMedia";
 
 vi.mock("../../api", () => ({
-  fetchFolder: vi.fn(),
+  fetchCategoryPage: vi.fn(),
 }));
 
-const mockedFetchFolder = vi.mocked(fetchFolder);
+const mockedFetchCategoryPage = vi.mocked(fetchCategoryPage);
 
 interface HookProps {
   rootVersion: number;
@@ -22,7 +22,7 @@ const makeCategoryPage = (
   path: string,
   names: string[],
   options: { nextCursor?: string; kind?: "image" | "video" } = {}
-): FolderPayload => {
+): CategoryPagePayload => {
   const kind = options.kind ?? "image";
   return {
     folder: { name: path, path },
@@ -30,7 +30,6 @@ const makeCategoryPage = (
       { name: "root", path: "" },
       { name: path, path },
     ],
-    subfolders: [],
     media: names.map((name, index) => ({
       ...makePerfMediaItem(path, index + 1, kind),
       name,
@@ -39,18 +38,25 @@ const makeCategoryPage = (
       thumbnailUrl: `/thumb/${path}/${name}`,
       modified: names.length - index,
     })),
-    totals: { media: names.length, subfolders: 0 },
+    counts: {
+      images: kind === "video" ? 0 : names.length,
+      gifs: 0,
+      videos: kind === "video" ? names.length : 0,
+      subfolders: 0,
+    },
+    totalMedia: names.length,
+    filteredTotal: names.length,
     nextCursor: options.nextCursor,
   };
 };
 
 describe("useCategoryMedia", () => {
   beforeEach(() => {
-    mockedFetchFolder.mockReset();
+    mockedFetchCategoryPage.mockReset();
   });
 
   it("requests sort-specific pages from the backend", async () => {
-    mockedFetchFolder.mockImplementation((path = "", options) => {
+    mockedFetchCategoryPage.mockImplementation((path, options) => {
       if (path !== "alpha") {
         throw new Error(`Unexpected path ${path}`);
       }
@@ -129,13 +135,13 @@ describe("useCategoryMedia", () => {
     });
 
     expect(
-      mockedFetchFolder.mock.calls.filter(
+      mockedFetchCategoryPage.mock.calls.filter(
         ([path, options]) =>
           path === "alpha" && options?.kind === "image" && options?.sort === "desc"
       )
     ).toHaveLength(1);
     expect(
-      mockedFetchFolder.mock.calls.filter(
+      mockedFetchCategoryPage.mock.calls.filter(
         ([path, options]) =>
           path === "alpha" && options?.kind === "image" && options?.sort === "asc"
       )
@@ -143,7 +149,7 @@ describe("useCategoryMedia", () => {
   });
 
   it("caches independently by media kind and sort order", async () => {
-    mockedFetchFolder.mockImplementation((path = "", options) => {
+    mockedFetchCategoryPage.mockImplementation((path, options) => {
       if (path !== "alpha") {
         throw new Error(`Unexpected path ${path}`);
       }
@@ -245,19 +251,19 @@ describe("useCategoryMedia", () => {
     });
 
     expect(
-      mockedFetchFolder.mock.calls.filter(
+      mockedFetchCategoryPage.mock.calls.filter(
         ([path, options]) =>
           path === "alpha" && options?.kind === "image" && options?.sort === "desc"
       )
     ).toHaveLength(1);
     expect(
-      mockedFetchFolder.mock.calls.filter(
+      mockedFetchCategoryPage.mock.calls.filter(
         ([path, options]) =>
           path === "alpha" && options?.kind === "image" && options?.sort === "asc"
       )
     ).toHaveLength(1);
     expect(
-      mockedFetchFolder.mock.calls.filter(
+      mockedFetchCategoryPage.mock.calls.filter(
         ([path, options]) =>
           path === "alpha" && options?.kind === "video" && options?.sort === "desc"
       )
@@ -265,7 +271,7 @@ describe("useCategoryMedia", () => {
   });
 
   it("merges paged media without duplicates in backend sort order", async () => {
-    mockedFetchFolder.mockImplementation((path = "", options) => {
+    mockedFetchCategoryPage.mockImplementation((path, options) => {
       if (path !== "alpha") {
         throw new Error(`Unexpected path ${path}`);
       }
@@ -321,7 +327,7 @@ describe("useCategoryMedia", () => {
   });
 
   it("rerolls media locally in random mode without refetching backend pages", async () => {
-    mockedFetchFolder.mockImplementation((path = "", options) => {
+    mockedFetchCategoryPage.mockImplementation((path, options) => {
       if (path !== "alpha") {
         throw new Error(`Unexpected path ${path}`);
       }
@@ -396,7 +402,7 @@ describe("useCategoryMedia", () => {
     });
 
     expect(
-      mockedFetchFolder.mock.calls.filter(
+      mockedFetchCategoryPage.mock.calls.filter(
         ([path, options]) =>
           path === "alpha" && options?.kind === "image" && options?.sort === "desc"
       )

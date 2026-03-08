@@ -2,7 +2,8 @@ import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
 import {
-  fetchFolder,
+  fetchCategoryPage,
+  fetchRootSummary,
   fetchFolderPreviews,
   fetchSystemUsage,
   fetchViewerPreferences,
@@ -11,11 +12,12 @@ import {
   postPreviewDiagnostics,
   postViewerPreferences,
 } from "./api";
-import type { FolderPayload, ViewerPreferences } from "./types";
+import type { CategoryPagePayload, RootSummaryPayload, ViewerPreferences } from "./types";
 import { renderWithQueryClient } from "./test/queryClient";
 
 vi.mock("./api", () => ({
-  fetchFolder: vi.fn(),
+  fetchCategoryPage: vi.fn(),
+  fetchRootSummary: vi.fn(),
   fetchFolderPreviews: vi.fn(),
   fetchSystemUsage: vi.fn(),
   fetchViewerPreferences: vi.fn(),
@@ -25,7 +27,8 @@ vi.mock("./api", () => ({
   postViewerPreferences: vi.fn(),
 }));
 
-const mockedFetchFolder = vi.mocked(fetchFolder);
+const mockedFetchCategoryPage = vi.mocked(fetchCategoryPage);
+const mockedFetchRootSummary = vi.mocked(fetchRootSummary);
 const mockedFetchFolderPreviews = vi.mocked(fetchFolderPreviews);
 const mockedFetchSystemUsage = vi.mocked(fetchSystemUsage);
 const mockedFetchViewerPreferences = vi.mocked(fetchViewerPreferences);
@@ -61,7 +64,7 @@ const deferred = <T,>() => {
   return { promise, resolve, reject };
 };
 
-const rootPayload = (): FolderPayload => ({
+const rootPayload = (): RootSummaryPayload => ({
   folder: { name: "root", path: "" },
   breadcrumb: [{ name: "root", path: "" }],
   subfolders: [
@@ -86,17 +89,15 @@ const rootPayload = (): FolderPayload => ({
       favorite: false,
     },
   ],
-  media: [],
   totals: { media: 0, subfolders: 2 },
 });
 
-const categoryPayload = (path: string, mediaName: string): FolderPayload => ({
+const categoryPayload = (path: string, mediaName: string): CategoryPagePayload => ({
   folder: { name: path, path },
   breadcrumb: [
     { name: "root", path: "" },
     { name: path, path },
   ],
-  subfolders: [],
   media: [
     {
       name: mediaName,
@@ -107,12 +108,15 @@ const categoryPayload = (path: string, mediaName: string): FolderPayload => ({
       modified: Date.now(),
     },
   ],
-  totals: { media: 1, subfolders: 0 },
+  counts: { images: 1, gifs: 0, videos: 0, subfolders: 0 },
+  totalMedia: 1,
+  filteredTotal: 1,
 });
 
 describe("App request race handling", () => {
   beforeEach(() => {
-    mockedFetchFolder.mockReset();
+    mockedFetchCategoryPage.mockReset();
+    mockedFetchRootSummary.mockReset();
     mockedFetchFolderPreviews.mockReset();
     mockedFetchSystemUsage.mockReset();
     mockedFetchViewerPreferences.mockReset();
@@ -134,13 +138,11 @@ describe("App request race handling", () => {
   });
 
   it("keeps latest selected category result when responses return out of order", async () => {
-    const alphaDeferred = deferred<FolderPayload>();
-    const betaDeferred = deferred<FolderPayload>();
+    const alphaDeferred = deferred<CategoryPagePayload>();
+    const betaDeferred = deferred<CategoryPagePayload>();
 
-    mockedFetchFolder.mockImplementation((path = "") => {
-      if (path === "") {
-        return Promise.resolve(rootPayload());
-      }
+    mockedFetchRootSummary.mockResolvedValue(rootPayload());
+    mockedFetchCategoryPage.mockImplementation((path) => {
       if (path === "alpha") {
         return alphaDeferred.promise;
       }

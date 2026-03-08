@@ -56,10 +56,44 @@ export function useAppInteractions({
   }, [heartCursorVisible]);
 
   useEffect(() => {
-    const originalOverflow = document.body.style.overflow;
-    document.body.style.overflow = selected ? "hidden" : originalOverflow;
+    if (!selected) return;
+
+    const body = document.body;
+    const documentElement = document.documentElement;
+    const scrollY = window.scrollY;
+    const originalBodyOverflow = body.style.overflow;
+    const originalBodyPosition = body.style.position;
+    const originalBodyTop = body.style.top;
+    const originalBodyLeft = body.style.left;
+    const originalBodyRight = body.style.right;
+    const originalBodyWidth = body.style.width;
+    const originalBodyOverscrollBehavior = body.style.overscrollBehavior;
+    const originalDocumentOverflow = documentElement.style.overflow;
+    const originalDocumentOverscrollBehavior = documentElement.style.overscrollBehavior;
+
+    body.style.overflow = "hidden";
+    body.style.position = "fixed";
+    body.style.top = `-${scrollY}px`;
+    body.style.left = "0";
+    body.style.right = "0";
+    body.style.width = "100%";
+    body.style.overscrollBehavior = "none";
+    documentElement.style.overflow = "hidden";
+    documentElement.style.overscrollBehavior = "none";
+
     return () => {
-      document.body.style.overflow = originalOverflow;
+      body.style.overflow = originalBodyOverflow;
+      body.style.position = originalBodyPosition;
+      body.style.top = originalBodyTop;
+      body.style.left = originalBodyLeft;
+      body.style.right = originalBodyRight;
+      body.style.width = originalBodyWidth;
+      body.style.overscrollBehavior = originalBodyOverscrollBehavior;
+      documentElement.style.overflow = originalDocumentOverflow;
+      documentElement.style.overscrollBehavior = originalDocumentOverscrollBehavior;
+      if (scrollY !== 0) {
+        window.scrollTo({ top: scrollY, behavior: "auto" });
+      }
     };
   }, [selected]);
 
