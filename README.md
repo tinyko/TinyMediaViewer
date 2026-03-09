@@ -20,7 +20,7 @@
 - 根目录 store 仍保留 `subfoldersByPath + orderBy*` 结构，但预览回填和收藏切换已经改成增量 patch 排序数组，不再每次把整张账号表展开后全量重排。
 - 右侧媒体网格支持 `按时间+`、`按时间-` 和 `按随机`。媒体随机顺序在前端基于当前已加载条目稳定重排，再次点击按钮才会换一组，不会为重洗牌重新拉接口。
 - Viewer 的本地偏好通过 Rust backend 写入 SQLite：搜索词、账号排序、账号随机 seed、媒体筛选、媒体排序、媒体随机 seed、当前账号、主题、手动主题、特效模式和渲染器在刷新或重启后都会恢复。前端现在由 `useViewerSession` 作为 facade，内部拆成 `useRootSession`、`useCategorySession`、`useViewerPersistence`、`useAuthRedirect`、`useCategorySelectionCoordinator` 和 `useRefreshCoordinator`，不再把所有副作用塞进一个大 hook。
-- 工具栏提供“系统占用情况”弹窗，按默认媒体根目录统计账号总占用、图片占用、视频占用、其它占用，并展示单个账号的 Top 5 大文件；前端仍有 30 秒缓存，但后端现在会后台维护一份完整热快照，手动刷新会显式绕过缓存并等待最新一轮统计完成。
+- 工具栏提供“系统占用情况”弹窗，按默认媒体根目录统计账号总占用、图片占用、视频占用、其它占用，并展示单个账号的 Top 5 大文件；前端仍有 30 秒缓存，但后端现在会后台维护一份完整热快照，手动刷新会显式绕过缓存并等待最新一轮统计完成。系统占用刷新内部已经改成 `refresh_id` ticket 协调：waiter 等待的是“不早于本次请求”的最新完成结果，而不是死等同一代 `root_generation`，因此目录失效在扫描中途升级时，旧请求也不会挂住。
 - 前端特效层已经收口成共享 `EffectsStage`，默认请求 `webgpu`，初始化失败时自动回退到 `canvas2d`，工具栏显示 `WG×`；当前 `webgpu` 分支已经改成实例化 GPU 绘制，不再走“先用 2D canvas 光栅化整帧，再上传纹理”的伪 GPU 路径。
 - `EffectsStage`、媒体预览弹窗和系统占用弹窗已经改成按需加载，viewer 首屏主包不再把这几个可选子系统一起打进去。
 - 预览态的当前项同步和前后导航已经改成基于 `path -> index` 的 O(1) 索引，不再在大媒体数组上做 `find/findIndex` 线性扫描。
@@ -29,6 +29,7 @@
 - 缩略图链路不再依赖 `ffmpeg`：图片和 GIF 首帧由 Rust 本地生成，macOS 上的视频缩略图走 AVFoundation；视频缩略图按 `/thumb/*` 请求懒生成并缓存到文件系统和 SQLite。
 - 预览弹窗会锁定背景滚动，移动端和平板上的上下手势不会再把底层主页面带着滚动。
 - SQLite 持久化层使用 `deadpool-sqlite` 连接池，每条连接在创建时都会补齐 `WAL`、`busy_timeout` 和相关 PRAGMA，再统一复用到 manifest、收藏和缩略图状态读写中。当前 schema 已到 `v6`：`folder_manifest` 只保留目录统计和 watched 目录元数据，`media_entry` 以 `(folder_path, media_path)` 为身份键，manifest 持久化改成事务内差量 upsert + 删除缺失项，不再写 `media_json/media_bin/default_page_media_json` 这套 legacy blob。
+- 桌面端 `AppRuntime` 已经拆成 `state`、`service_manager`、`operation` 三层：只读命令只拿 `state`，启停/保存配置通过 `operation` 串行化，并且会先写入并广播一次 `starting` 再单独等待 sidecar restart + health check，所以设置面板读状态和打开 viewer 不会再被重启过程整段阻塞。
 
 ## 仓库结构
 - `backend-rs/`
@@ -42,7 +43,7 @@
 - `web/`
   React 19 + Vite viewer。根目录数据通过本地归一化 store 管理，账号排序数组按增量 patch 维护；分类媒体通过 React Query 分页缓存和 hook 内 append-only 聚合管理，账号和媒体列表都支持稳定随机重排，Viewer 偏好通过后端 SQLite 持久化，session 状态按 root/category/persistence/refresh/auth 协调拆开，特效层支持真实 `canvas2d/webgpu` 双分支。
 - `desktop/`
-  Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包，并在打包时把当前 `git rev-parse --short HEAD` 和 UTC 构建时间注入 viewer 指纹。设置面板的状态同步已经收口成事件优先模型：常态下不再做固定轮询，只在启动态限时补拉、窗口重新可见且数据过旧时兜底刷新。
+  Tauri 2 桌面壳层。负责托盘、设置面板、sidecar 生命周期和 DMG 打包，并在打包时把当前 `git rev-parse --short HEAD` 和 UTC 构建时间注入 viewer 指纹。设置面板的状态同步已经收口成事件优先模型：常态下不再做固定轮询，只在启动态限时补拉、窗口重新可见且数据过旧时兜底刷新；内部 runtime 现在按 `state/service_manager/operation` 分层，重启期间仍可及时读取 `starting` 状态。
 - `archive/node-legacy/`
   归档的 Node/Fastify 旧实现，仅作历史参考，不参与主线运行、构建或 CI。目录内仍保留 legacy smoke 脚本，脚本会自行构建依赖的后端并在失败时保存错误截图。
 
@@ -145,15 +146,28 @@ Web：
 cd /Users/tiny/X/media-viewer/web
 npm run lint
 npm test
+npm run test:e2e
 npm run build
+npm run bench
+npm run profile:backend
 ```
+
+补充说明：
+- `npm run test:e2e` 会启动独立的 Playwright fixture backend/frontend，不依赖你真实的 `/Users/tiny/X` 媒体库。
+- `npm run bench` 会把 API 和 UI 基准报告写到 `output/benchmarks/`。
+- `npm run profile:backend` 目前只支持 macOS，会调用系统 `sample` 并把报告写到 `output/profiles/`。
 
 Desktop：
 
 ```bash
 cd /Users/tiny/X/media-viewer/desktop/src-tauri
+cargo test
 cargo check
 ```
+
+## CI
+- `.github/workflows/ci.yml` 当前会在 Ubuntu 跑 Rust backend `fmt/check/test/build`、contracts 校验、Web `lint/test/build`，并额外跑一套 Playwright E2E。
+- 同一条 workflow 还会在 macOS 跑一份 Rust backend `fmt/check/test/build` 和 contracts 校验，用来覆盖 AVFoundation/macOS 路径相关回归。
 
 ## 相关说明
 - `desktop/README.md` 说明桌面壳层和 DMG 打包。

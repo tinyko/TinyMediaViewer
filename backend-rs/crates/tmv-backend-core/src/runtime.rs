@@ -4,12 +4,16 @@ use std::{
     sync::{Arc, RwLock},
 };
 
+type Generation = u64;
+type PreviewCacheByLimit = HashMap<usize, (Generation, FolderPreview)>;
+type PreviewCacheByPath = HashMap<String, PreviewCacheByLimit>;
+
 #[derive(Default)]
 pub(crate) struct RuntimeState {
-    path_generations: RwLock<HashMap<String, u64>>,
-    light_snapshots: RwLock<HashMap<String, (u64, Arc<FolderSnapshot>)>>,
-    previews: RwLock<HashMap<String, HashMap<usize, (u64, FolderPreview)>>>,
-    manifests: RwLock<HashMap<String, (u64, DirectoryManifest)>>,
+    path_generations: RwLock<HashMap<String, Generation>>,
+    light_snapshots: RwLock<HashMap<String, (Generation, Arc<FolderSnapshot>)>>,
+    previews: RwLock<PreviewCacheByPath>,
+    manifests: RwLock<HashMap<String, (Generation, DirectoryManifest)>>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]

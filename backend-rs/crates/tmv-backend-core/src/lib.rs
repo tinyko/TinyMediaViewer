@@ -711,6 +711,7 @@ mod tests {
     };
     use tempfile::tempdir;
     use tokio::fs;
+    use tokio::sync::Notify;
     use tokio::time::{sleep, Duration};
 
     fn test_backend_config(root: PathBuf, thumbs: PathBuf) -> BackendConfig {
@@ -1606,6 +1607,94 @@ mod tests {
         assert_eq!(top_two.items.len(), 2);
         assert_eq!(top_one.items[0].account, top_two.items[0].account);
         assert_eq!(top_one.items[0].total_size, top_two.items[0].total_size);
+
+        Ok(())
+    }
+
+    async fn create_system_usage_service() -> Result<(tempfile::TempDir, BackendService, PathBuf)> {
+        let temp = tempdir()?;
+        let root = temp.path().join("root");
+        let index = temp.path().join("index");
+        let thumbs = temp.path().join("thumbs");
+        let diag = temp.path().join("diag");
+
+        fs::create_dir_all(root.join("alpha/images")).await?;
+        fs::write(root.join("alpha/images/pic.jpg"), vec![0_u8; 10]).await?;
+
+        let service = BackendService::new(
+            test_backend_config(root.clone(), thumbs),
+            IndexStore::new(index).await?,
+            DiagnosticsWriter::new(diag).await?,
+        )
+        .await?;
+        wait_for_system_usage_refresh(&service, 1).await;
+
+        Ok((temp, service, root))
+    }
+
+    #[tokio::test]
+    async fn system_usage_waiter_does_not_hang_when_refresh_is_superseded() -> Result<()> {
+        let (_temp, service, root) = create_system_usage_service().await?;
+        let scan_gate = Arc::new(Notify::new());
+        service
+            .system_usage_runtime
+            .install_scan_gate(scan_gate.clone())
+            .await;
+
+        fs::write(root.join("alpha/images/first-update.jpg"), vec![0_u8; 5]).await?;
+        service.invalidate_runtime_path("alpha");
+        service.system_usage_runtime.wait_for_refresh_start(2).await;
+
+        let waiter_service = service.clone();
+        let waiter =
+            tokio::spawn(async move { waiter_service.get_system_usage_report(10, false).await });
+        tokio::task::yield_now().await;
+
+        fs::write(root.join("alpha/images/second-update.jpg"), vec![0_u8; 7]).await?;
+        service.invalidate_runtime_path("alpha");
+        service.system_usage_runtime.clear_scan_gate().await;
+        scan_gate.notify_waiters();
+
+        let report = tokio::time::timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("system usage waiter should complete after the latest refresh")??;
+
+        assert_eq!(service.system_usage_runtime.current_refresh_id().await, 3);
+        assert_eq!(report.items[0].total_size, 22);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn system_usage_superseded_waiter_returns_latest_report() -> Result<()> {
+        let (_temp, service, root) = create_system_usage_service().await?;
+        let scan_gate = Arc::new(Notify::new());
+        service
+            .system_usage_runtime
+            .install_scan_gate(scan_gate.clone())
+            .await;
+
+        fs::write(root.join("alpha/images/first-update.jpg"), vec![0_u8; 5]).await?;
+        service.invalidate_runtime_path("alpha");
+        service.system_usage_runtime.wait_for_refresh_start(2).await;
+
+        let waiter_service = service.clone();
+        let waiter =
+            tokio::spawn(async move { waiter_service.get_system_usage_report(10, false).await });
+        tokio::task::yield_now().await;
+
+        fs::create_dir_all(root.join("alpha/videos")).await?;
+        fs::write(root.join("alpha/videos/clip.mp4"), vec![0_u8; 20]).await?;
+        service.invalidate_runtime_path("alpha");
+        service.system_usage_runtime.clear_scan_gate().await;
+        scan_gate.notify_waiters();
+
+        let report = waiter.await??;
+
+        assert_eq!(service.system_usage_runtime.current_refresh_id().await, 3);
+        assert_eq!(report.items[0].image_size, 15);
+        assert_eq!(report.items[0].video_size, 20);
+        assert_eq!(report.items[0].total_size, 35);
 
         Ok(())
     }

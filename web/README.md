@@ -36,5 +36,23 @@ npm run dev
 npm run preview
 npm run lint
 npm test
+npm run test:e2e
+npm run test:e2e:headed
 npm run build
+npm run bench
+npm run profile:backend
 ```
+
+## E2E
+- `npm run test:e2e` uses Playwright with a deterministic fixture media root built from the repo-level `demo.png` and `demo.mp4`.
+- The suite starts its own Rust backend on `127.0.0.1:4100` and Vite frontend on `127.0.0.1:4173`, so it does not depend on your real `/Users/tiny/X` library.
+- `npm run test:e2e:headed` runs the same suite in headed mode for local debugging.
+- Failure artifacts and reports are written under `../output/playwright/`.
+
+## Benchmarks And Profiling
+- `npm run bench:api` starts the Rust backend against a generated synthetic fixture library, defaults to the backend `release` profile, and writes API latency summaries to `../output/benchmarks/`.
+- `npm run bench:ui` launches Chromium headless against the same fixture stack, starts its own frontend/backend pair, and records page-load / modal-open timings to `../output/benchmarks/`.
+- `npm run bench` runs both benchmark passes.
+- `npm run profile:backend` is macOS-only; it builds `tmv-backend-app` with the Cargo `profiling` profile and captures a system `sample` report under `../output/profiles/`.
+- Benchmark scale can be adjusted with env vars such as `TMV_BENCH_ACCOUNTS`, `TMV_BENCH_IMAGES_PER_ACCOUNT`, `TMV_BENCH_VIDEOS_PER_ACCOUNT`, and `TMV_BENCH_ITERATIONS`.
+- Backend profiling accepts its own knobs such as `TMV_PROFILE_ACCOUNTS`, `TMV_PROFILE_IMAGES_PER_ACCOUNT`, `TMV_PROFILE_VIDEOS_PER_ACCOUNT`, and `TMV_PROFILE_DURATION_SECONDS`.

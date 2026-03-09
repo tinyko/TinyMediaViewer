@@ -27,16 +27,17 @@ const POPOVER_MARGIN_TOP: f64 = 8.0;
 pub struct AppRuntime {
     pub settings_path: PathBuf,
     pub diagnostics: Arc<DiagnosticsStore>,
-    pub inner: Mutex<RuntimeInner>,
+    pub state: Mutex<AppStateStore>,
+    pub service_manager: Mutex<ServiceManager>,
+    pub operation: Mutex<()>,
 }
 
-pub struct RuntimeInner {
+pub struct AppStateStore {
     pub settings: Settings,
     pub runtime: RuntimeState,
-    pub service_manager: ServiceManager,
 }
 
-impl RuntimeInner {
+impl AppStateStore {
     fn to_payload(&self) -> AppStatePayload {
         AppStatePayload {
             settings: self.settings.clone(),
@@ -72,11 +73,12 @@ pub fn run() {
             app.manage(AppRuntime {
                 settings_path,
                 diagnostics: diagnostics.clone(),
-                inner: Mutex::new(RuntimeInner {
+                state: Mutex::new(AppStateStore {
                     settings: settings.clone(),
                     runtime: RuntimeState::stopped(),
-                    service_manager: ServiceManager::new(diagnostics),
                 }),
+                service_manager: Mutex::new(ServiceManager::new(diagnostics)),
+                operation: Mutex::new(()),
             });
 
             apply_autostart(app.handle(), settings.launch_at_login)?;
@@ -129,33 +131,72 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
     }
 }
 
-pub async fn restart_services_internal(app: &AppHandle) -> Result<AppStatePayload, String> {
-    let state = app.state::<AppRuntime>();
+pub(crate) async fn current_app_state(runtime: &AppRuntime) -> AppStatePayload {
+    runtime.state.lock().await.to_payload()
+}
 
-    let payload = {
-        let mut inner = state.inner.lock().await;
-        inner.runtime = RuntimeState::starting();
-        let settings = inner.settings.clone();
+pub(crate) async fn set_starting_state(
+    runtime: &AppRuntime,
+    next_settings: Option<Settings>,
+) -> (Settings, AppStatePayload) {
+    let mut state = runtime.state.lock().await;
+    if let Some(settings) = next_settings {
+        state.settings = settings;
+    }
+    state.runtime = RuntimeState::starting();
+    let payload = state.to_payload();
+    let settings = state.settings.clone();
+    (settings, payload)
+}
 
-        inner.runtime = match inner.service_manager.restart(app, &settings).await {
-            Ok(runtime) => runtime,
-            Err(error) => RuntimeState::error(error),
-        };
+pub(crate) async fn set_runtime_state(
+    runtime: &AppRuntime,
+    next_runtime: RuntimeState,
+) -> AppStatePayload {
+    let mut state = runtime.state.lock().await;
+    state.runtime = next_runtime;
+    state.to_payload()
+}
 
-        inner.to_payload()
-    };
-
+pub(crate) fn emit_app_state_updated(app: &AppHandle, payload: &AppStatePayload) {
     let _ = app.emit("app-state-updated", payload.clone());
-    Ok(payload)
+}
+
+async fn restart_services_locked(
+    app: &AppHandle,
+    runtime: &AppRuntime,
+    next_settings: Option<Settings>,
+) -> AppStatePayload {
+    let (settings, starting_payload) = set_starting_state(runtime, next_settings).await;
+    emit_app_state_updated(app, &starting_payload);
+
+    let next_runtime = {
+        let mut service_manager = runtime.service_manager.lock().await;
+        match service_manager.restart(app, &settings).await {
+            Ok(runtime_state) => runtime_state,
+            Err(error) => RuntimeState::error(error),
+        }
+    };
+    let payload = set_runtime_state(runtime, next_runtime).await;
+    emit_app_state_updated(app, &payload);
+    payload
+}
+
+pub async fn restart_services_internal(app: &AppHandle) -> Result<AppStatePayload, String> {
+    let runtime = app.state::<AppRuntime>();
+    let _operation = runtime.operation.lock().await;
+    Ok(restart_services_locked(app, &runtime, None).await)
 }
 
 pub async fn stop_services_internal(app: &AppHandle) {
-    if let Some(state) = app.try_state::<AppRuntime>() {
-        let mut inner = state.inner.lock().await;
-        inner.service_manager.stop().await;
-        inner.runtime = RuntimeState::stopped();
-        let payload = inner.to_payload();
-        let _ = app.emit("app-state-updated", payload);
+    if let Some(runtime) = app.try_state::<AppRuntime>() {
+        let _operation = runtime.operation.lock().await;
+        {
+            let mut service_manager = runtime.service_manager.lock().await;
+            service_manager.stop().await;
+        }
+        let payload = set_runtime_state(&runtime, RuntimeState::stopped()).await;
+        emit_app_state_updated(app, &payload);
     }
 }
 
@@ -247,11 +288,8 @@ fn setup_tray(app: &AppHandle) -> Result<(), String> {
             MENU_OPEN_VIEWER => {
                 let app_handle = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let state = app_handle.state::<AppRuntime>();
-                    let viewer_url = {
-                        let inner = state.inner.lock().await;
-                        inner.runtime.viewer_local_url.clone()
-                    };
+                    let runtime = app_handle.state::<AppRuntime>();
+                    let viewer_url = runtime.state.lock().await.runtime.viewer_local_url.clone();
 
                     if !viewer_url.is_empty() {
                         let _ = webbrowser::open(&viewer_url);
@@ -325,5 +363,165 @@ fn show_settings_window_with_anchor(app: &AppHandle, anchor_rect: Option<Rect>) 
 
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex};
+    use tempfile::tempdir;
+    use tokio::sync::Notify;
+
+    fn test_runtime() -> Result<(tempfile::TempDir, Arc<AppRuntime>), String> {
+        let temp = tempdir().map_err(|error| format!("tempdir failed: {error}"))?;
+        let diagnostics = Arc::new(DiagnosticsStore::new(temp.path().join("diagnostics"))?);
+        let runtime = Arc::new(AppRuntime {
+            settings_path: temp.path().join("settings.json"),
+            diagnostics: diagnostics.clone(),
+            state: Mutex::new(AppStateStore {
+                settings: Settings::default(),
+                runtime: RuntimeState::stopped(),
+            }),
+            service_manager: Mutex::new(ServiceManager::new(diagnostics)),
+            operation: Mutex::new(()),
+        });
+        Ok((temp, runtime))
+    }
+
+    #[tokio::test]
+    async fn app_state_can_be_read_while_restart_like_operation_is_in_progress(
+    ) -> Result<(), String> {
+        let (_temp, runtime) = test_runtime()?;
+        let release = Arc::new(Notify::new());
+        let release_for_task = release.clone();
+        let runtime_for_task = runtime.clone();
+
+        let task = tokio::spawn(async move {
+            let _operation = runtime_for_task.operation.lock().await;
+            let _ = set_starting_state(&runtime_for_task, None).await;
+            release_for_task.notified().await;
+            set_runtime_state(
+                &runtime_for_task,
+                RuntimeState::running("rust", 4300, 4300, None),
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        let starting = current_app_state(&runtime).await;
+        assert!(matches!(
+            starting.runtime.status,
+            config::RuntimeStatus::Starting
+        ));
+
+        release.notify_waiters();
+        let finished = task
+            .await
+            .map_err(|error| format!("join failed: {error}"))?;
+        assert!(matches!(
+            finished.runtime.status,
+            config::RuntimeStatus::Running
+        ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn app_state_helpers_support_starting_to_error_transition() -> Result<(), String> {
+        let (_temp, runtime) = test_runtime()?;
+
+        let (settings, starting) = set_starting_state(&runtime, None).await;
+        assert_eq!(settings.home_dir, Settings::default().home_dir);
+        assert!(matches!(
+            starting.runtime.status,
+            config::RuntimeStatus::Starting
+        ));
+
+        let failed = set_runtime_state(&runtime, RuntimeState::error("boom".to_string())).await;
+        assert!(matches!(
+            failed.runtime.status,
+            config::RuntimeStatus::Error
+        ));
+        assert_eq!(failed.runtime.last_error.as_deref(), Some("boom"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn operation_lock_serializes_restart_like_flows() -> Result<(), String> {
+        let (_temp, runtime) = test_runtime()?;
+        let first_started = Arc::new(Notify::new());
+        let release_first = Arc::new(Notify::new());
+        let events = Arc::new(StdMutex::new(Vec::<&'static str>::new()));
+
+        let runtime_for_first = runtime.clone();
+        let first_started_for_task = first_started.clone();
+        let release_first_for_task = release_first.clone();
+        let events_for_first = events.clone();
+        let first = tokio::spawn(async move {
+            let _operation = runtime_for_first.operation.lock().await;
+            events_for_first
+                .lock()
+                .expect("events mutex poisoned")
+                .push("first-start");
+            let _ = set_starting_state(&runtime_for_first, None).await;
+            first_started_for_task.notify_waiters();
+            release_first_for_task.notified().await;
+            let payload = set_runtime_state(
+                &runtime_for_first,
+                RuntimeState::running("rust", 4300, 4300, None),
+            )
+            .await;
+            events_for_first
+                .lock()
+                .expect("events mutex poisoned")
+                .push("first-end");
+            payload
+        });
+
+        first_started.notified().await;
+
+        let runtime_for_second = runtime.clone();
+        let events_for_second = events.clone();
+        let second = tokio::spawn(async move {
+            let _operation = runtime_for_second.operation.lock().await;
+            events_for_second
+                .lock()
+                .expect("events mutex poisoned")
+                .push("second-start");
+            let _ = set_starting_state(&runtime_for_second, None).await;
+            let payload = set_runtime_state(
+                &runtime_for_second,
+                RuntimeState::error("second".to_string()),
+            )
+            .await;
+            events_for_second
+                .lock()
+                .expect("events mutex poisoned")
+                .push("second-end");
+            payload
+        });
+
+        tokio::task::yield_now().await;
+        assert_eq!(
+            events.lock().expect("events mutex poisoned").as_slice(),
+            ["first-start"]
+        );
+
+        release_first.notify_waiters();
+        let _ = first
+            .await
+            .map_err(|error| format!("first join failed: {error}"))?;
+        let _ = second
+            .await
+            .map_err(|error| format!("second join failed: {error}"))?;
+
+        assert_eq!(
+            events.lock().expect("events mutex poisoned").as_slice(),
+            ["first-start", "first-end", "second-start", "second-end"]
+        );
+
+        Ok(())
     }
 }

@@ -20,7 +20,6 @@ struct SystemUsageSnapshot {
 
 #[derive(Debug, Clone)]
 struct SystemUsageFailure {
-    root_generation: u64,
     refresh_id: u64,
     message: String,
 }
@@ -30,8 +29,10 @@ struct SystemUsageRuntimeState {
     snapshot: Option<SystemUsageSnapshot>,
     last_failure: Option<SystemUsageFailure>,
     requested_generation: Option<u64>,
-    force_generation: Option<u64>,
+    requested_refresh_id: Option<u64>,
+    requested_force: bool,
     in_progress_generation: Option<u64>,
+    in_progress_refresh_id: Option<u64>,
     completed_refresh_id: u64,
 }
 
@@ -40,6 +41,10 @@ pub(crate) struct SystemUsageRuntime {
     state: AsyncMutex<SystemUsageRuntimeState>,
     worker_notify: Notify,
     waiter_notify: Notify,
+    #[cfg(test)]
+    scan_started_notify: Notify,
+    #[cfg(test)]
+    scan_gate: AsyncMutex<Option<Arc<Notify>>>,
 }
 
 impl SystemUsageRuntime {
@@ -47,7 +52,9 @@ impl SystemUsageRuntime {
         tokio::spawn(async move {
             loop {
                 self.worker_notify.notified().await;
-                while let Some(root_generation) = self.begin_refresh().await {
+                while let Some((root_generation, refresh_id)) = self.begin_refresh().await {
+                    #[cfg(test)]
+                    self.before_refresh_scan(refresh_id).await;
                     let root_path = service.config.media_root.clone();
                     let result = tokio::task::spawn_blocking(move || {
                         build_full_system_usage_report(&root_path)
@@ -55,7 +62,8 @@ impl SystemUsageRuntime {
                     .await
                     .map_err(|error| anyhow!("join system usage scan task: {error}"))
                     .and_then(|result| result);
-                    self.finish_refresh(root_generation, result).await;
+                    self.finish_refresh(root_generation, refresh_id, result)
+                        .await;
                 }
             }
         });
@@ -69,23 +77,47 @@ impl SystemUsageRuntime {
             }
         }
 
-        let expected_refresh_id = state.completed_refresh_id + 1;
-        state.requested_generation = Some(
-            state
-                .requested_generation
-                .map_or(root_generation, |current| current.max(root_generation)),
-        );
-        if force {
-            state.force_generation = Some(root_generation);
+        if let (Some(requested_generation), Some(requested_refresh_id)) =
+            (state.requested_generation, state.requested_refresh_id)
+        {
+            if requested_generation >= root_generation {
+                if force {
+                    state.requested_force = true;
+                }
+                return requested_refresh_id;
+            }
         }
+
+        if let (Some(in_progress_generation), Some(in_progress_refresh_id)) =
+            (state.in_progress_generation, state.in_progress_refresh_id)
+        {
+            if in_progress_generation >= root_generation {
+                return in_progress_refresh_id;
+            }
+        }
+
+        let refresh_id = if let Some(requested_refresh_id) = state.requested_refresh_id {
+            state.requested_generation = Some(
+                state
+                    .requested_generation
+                    .map_or(root_generation, |current| current.max(root_generation)),
+            );
+            state.requested_force |= force;
+            requested_refresh_id
+        } else {
+            let next_refresh_id = Self::next_refresh_id(&state);
+            state.requested_generation = Some(root_generation);
+            state.requested_refresh_id = Some(next_refresh_id);
+            state.requested_force = force;
+            next_refresh_id
+        };
         drop(state);
         self.worker_notify.notify_one();
-        expected_refresh_id
+        refresh_id
     }
 
     pub(crate) async fn wait_for_report(
         &self,
-        root_generation: u64,
         minimum_refresh_id: u64,
         limit: usize,
     ) -> Result<SystemUsageReport> {
@@ -93,26 +125,38 @@ impl SystemUsageRuntime {
             let notified = self.waiter_notify.notified();
             {
                 let state = self.state.lock().await;
-                if let Some(snapshot) = state.snapshot.as_ref() {
-                    if snapshot.root_generation == root_generation
-                        && snapshot.refresh_id >= minimum_refresh_id
+                let snapshot = state
+                    .snapshot
+                    .as_ref()
+                    .filter(|snapshot| snapshot.refresh_id >= minimum_refresh_id);
+                let failure = state
+                    .last_failure
+                    .as_ref()
+                    .filter(|failure| failure.refresh_id >= minimum_refresh_id);
+
+                match (snapshot, failure) {
+                    (Some(snapshot), Some(failure))
+                        if snapshot.refresh_id >= failure.refresh_id =>
                     {
                         return Ok(truncate_system_usage_report(&snapshot.report, limit));
                     }
-                }
-                if let Some(failure) = state.last_failure.as_ref() {
-                    if failure.root_generation == root_generation
-                        && failure.refresh_id >= minimum_refresh_id
-                    {
+                    (Some(_), Some(failure)) => {
                         return Err(anyhow!(failure.message.clone()));
                     }
+                    (Some(snapshot), None) => {
+                        return Ok(truncate_system_usage_report(&snapshot.report, limit));
+                    }
+                    (None, Some(failure)) => {
+                        return Err(anyhow!(failure.message.clone()));
+                    }
+                    (None, None) => {}
                 }
             }
             notified.await;
         }
     }
 
-    async fn begin_refresh(&self) -> Option<u64> {
+    async fn begin_refresh(&self) -> Option<(u64, u64)> {
         let mut state = self.state.lock().await;
         loop {
             if state.in_progress_generation.is_some() {
@@ -120,37 +164,47 @@ impl SystemUsageRuntime {
             }
 
             let root_generation = state.requested_generation?;
-            let force = state.force_generation == Some(root_generation);
+            let refresh_id = state
+                .requested_refresh_id
+                .expect("requested refresh id must exist when generation is queued");
+            let force = state.requested_force;
             let already_current = state
                 .snapshot
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.root_generation == root_generation);
             if already_current && !force {
                 state.requested_generation = None;
+                state.requested_refresh_id = None;
+                state.requested_force = false;
                 continue;
             }
 
             state.requested_generation = None;
-            if force {
-                state.force_generation = None;
-            }
+            state.requested_refresh_id = None;
+            state.requested_force = false;
             state.in_progress_generation = Some(root_generation);
-            return Some(root_generation);
+            state.in_progress_refresh_id = Some(refresh_id);
+            return Some((root_generation, refresh_id));
         }
     }
 
-    async fn finish_refresh(&self, root_generation: u64, result: Result<SystemUsageReport>) {
+    async fn finish_refresh(
+        &self,
+        root_generation: u64,
+        refresh_id: u64,
+        result: Result<SystemUsageReport>,
+    ) {
         let should_continue = {
             let mut state = self.state.lock().await;
             state.in_progress_generation = None;
+            state.in_progress_refresh_id = None;
             let superseded = state
                 .requested_generation
                 .is_some_and(|requested| requested > root_generation);
             if superseded {
                 true
             } else {
-                state.completed_refresh_id += 1;
-                let refresh_id = state.completed_refresh_id;
+                state.completed_refresh_id = state.completed_refresh_id.max(refresh_id);
 
                 match result {
                     Ok(report) => {
@@ -163,7 +217,6 @@ impl SystemUsageRuntime {
                     }
                     Err(error) => {
                         state.last_failure = Some(SystemUsageFailure {
-                            root_generation,
                             refresh_id,
                             message: error.to_string(),
                         });
@@ -184,6 +237,52 @@ impl SystemUsageRuntime {
     pub(crate) async fn current_refresh_id(&self) -> u64 {
         self.state.lock().await.completed_refresh_id
     }
+
+    fn next_refresh_id(state: &SystemUsageRuntimeState) -> u64 {
+        [
+            state.completed_refresh_id,
+            state.requested_refresh_id.unwrap_or(0),
+            state.in_progress_refresh_id.unwrap_or(0),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0)
+            + 1
+    }
+
+    #[cfg(test)]
+    async fn before_refresh_scan(&self, refresh_id: u64) {
+        self.scan_started_notify.notify_waiters();
+        let gate = { self.scan_gate.lock().await.clone() };
+        if let Some(gate) = gate {
+            let _ = refresh_id;
+            gate.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_scan_gate(&self, gate: Arc<Notify>) {
+        *self.scan_gate.lock().await = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn clear_scan_gate(&self) {
+        *self.scan_gate.lock().await = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_refresh_start(&self, refresh_id: u64) {
+        loop {
+            let notified = self.scan_started_notify.notified();
+            {
+                let state = self.state.lock().await;
+                if state.in_progress_refresh_id == Some(refresh_id) {
+                    return;
+                }
+            }
+            notified.await;
+        }
+    }
 }
 
 impl BackendService {
@@ -199,7 +298,7 @@ impl BackendService {
             .request_refresh(root_generation, bypass_cache)
             .await;
         self.system_usage_runtime
-            .wait_for_report(root_generation, minimum_refresh_id, max_items)
+            .wait_for_report(minimum_refresh_id, max_items)
             .await
     }
 }

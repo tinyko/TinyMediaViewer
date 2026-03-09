@@ -1,8 +1,9 @@
 use crate::{
     apply_autostart,
     config::{self, AppStatePayload, RuntimeState, Settings, ViewerAccessMode},
+    current_app_state,
     diagnostics::DiagnosticsState,
-    AppRuntime,
+    emit_app_state_updated, set_runtime_state, set_starting_state, AppRuntime,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -34,8 +35,7 @@ impl SettingsInput {
 
 #[tauri::command]
 pub async fn get_app_state(state: State<'_, AppRuntime>) -> Result<AppStatePayload, String> {
-    let inner = state.inner.lock().await;
-    Ok(inner.to_payload())
+    Ok(current_app_state(&state).await)
 }
 
 #[tauri::command]
@@ -47,23 +47,22 @@ pub async fn save_settings(
     validate_settings(&input)?;
     let settings = input.into_settings();
 
+    let _operation = state.operation.lock().await;
     config::save_settings(&state.settings_path, &settings)?;
     apply_autostart(&app, settings.launch_at_login)?;
 
-    let payload = {
-        let mut inner = state.inner.lock().await;
-        inner.settings = settings.clone();
-        inner.runtime = RuntimeState::starting();
+    let (active_settings, starting_payload) = set_starting_state(&state, Some(settings)).await;
+    emit_app_state_updated(&app, &starting_payload);
 
-        inner.runtime = match inner.service_manager.restart(&app, &settings).await {
-            Ok(runtime) => runtime,
+    let next_runtime = {
+        let mut service_manager = state.service_manager.lock().await;
+        match service_manager.restart(&app, &active_settings).await {
+            Ok(runtime_state) => runtime_state,
             Err(error) => RuntimeState::error(error),
-        };
-
-        inner.to_payload()
+        }
     };
-
-    let _ = app.emit("app-state-updated", payload.clone());
+    let payload = set_runtime_state(&state, next_runtime).await;
+    emit_app_state_updated(&app, &payload);
     Ok(payload)
 }
 
@@ -72,20 +71,19 @@ pub async fn restart_services(
     app: AppHandle,
     state: State<'_, AppRuntime>,
 ) -> Result<AppStatePayload, String> {
-    let payload = {
-        let mut inner = state.inner.lock().await;
-        inner.runtime = RuntimeState::starting();
-        let settings = inner.settings.clone();
+    let _operation = state.operation.lock().await;
+    let (settings, starting_payload) = set_starting_state(&state, None).await;
+    emit_app_state_updated(&app, &starting_payload);
 
-        inner.runtime = match inner.service_manager.restart(&app, &settings).await {
-            Ok(runtime) => runtime,
+    let next_runtime = {
+        let mut service_manager = state.service_manager.lock().await;
+        match service_manager.restart(&app, &settings).await {
+            Ok(runtime_state) => runtime_state,
             Err(error) => RuntimeState::error(error),
-        };
-
-        inner.to_payload()
+        }
     };
-
-    let _ = app.emit("app-state-updated", payload.clone());
+    let payload = set_runtime_state(&state, next_runtime).await;
+    emit_app_state_updated(&app, &payload);
     Ok(payload)
 }
 
@@ -100,10 +98,7 @@ pub async fn pick_home_directory() -> Result<Option<String>, String> {
 
 #[tauri::command]
 pub async fn open_viewer(app: AppHandle, state: State<'_, AppRuntime>) -> Result<(), String> {
-    let viewer_url = {
-        let inner = state.inner.lock().await;
-        inner.runtime.viewer_local_url.clone()
-    };
+    let viewer_url = state.state.lock().await.runtime.viewer_local_url.clone();
 
     if viewer_url.is_empty() {
         return Err("Viewer URL is empty. Start the service first.".to_string());

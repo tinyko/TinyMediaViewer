@@ -8,12 +8,14 @@ Tauri tray application for TinyMediaViewer.
 - Open the local viewer URL and expose runtime state to the settings UI
 - Bundle the same Rust backend that now persists viewer preferences, favorites, thumbnail state and other local metadata into SQLite
 - Keep the settings panel in sync with the runtime through an event-first refresh model instead of a permanent steady-state polling loop
+- Keep restart-like flows serialized with an `operation` lock while `state` reads stay independent from `service_manager`, so the UI can surface `starting` immediately and remain responsive during sidecar health checks
 
 ## Packaging
 ```bash
 npm install
 npm run prepare:bundle
 npm run build:dmg
+cd src-tauri && cargo test
 ```
 
 `prepare:bundle` does four things:
@@ -30,5 +32,7 @@ The bundled viewer also includes the current root/category API split, append-onl
 ## Notes
 - `npm run build:dmg` is the normal packaging entry. It runs `prepare:bundle` first and then calls `tauri build --target aarch64-apple-darwin`.
 - The settings window refreshes state on initial load, on `app-state-updated` events, after save/restart actions, and when the window becomes visible after stale data; only the `starting` runtime state enables a bounded retry window.
+- Restart, save-settings, startup and shutdown flows now all follow the same pattern: take `operation`, write and emit `starting`, restart the sidecar behind `service_manager`, then write and emit the final runtime state.
 - The viewer build fingerprint comes from `git rev-parse --short HEAD` plus the current UTC time. If you build from a dirty worktree, the UI still shows the last commit hash.
 - The default DMG output path is `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/TinyMediaViewer_0.1.0_aarch64.dmg`.
+- Desktop runtime regression tests live in `src-tauri/src/lib.rs` and cover readable app state during restart-like operations, `starting -> error` transitions, and operation-lock serialization.
